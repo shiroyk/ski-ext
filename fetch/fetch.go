@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"time"
 
 	"github.com/shiroyk/cloudcat"
@@ -54,7 +53,7 @@ type Options struct {
 	Timeout               time.Duration     `yaml:"timeout"`
 	CachePolicy           Policy            `yaml:"cache-policy"`
 	RoundTripper          http.RoundTripper `yaml:"-"`
-	Jar                   *cookiejar.Jar    `yaml:"-"`
+	Jar                   http.CookieJar    `yaml:"-"`
 }
 
 // NewFetch returns a new cloudcat.Fetch instance
