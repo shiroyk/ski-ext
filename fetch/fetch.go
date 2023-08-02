@@ -10,10 +10,11 @@ import (
 
 	"github.com/shiroyk/cloudcat"
 	"github.com/shiroyk/cloudcat-ext/fetch/http2"
+	"golang.org/x/exp/slices"
 	"golang.org/x/net/html/charset"
 )
 
-type fetcher struct {
+type fetchImpl struct {
 	*http.Client
 	charsetDetectDisabled bool
 	maxBodySize           int64
@@ -44,11 +45,11 @@ var (
 	}
 )
 
-// Options The Fetch instance options
+// Options The fetchImpl instance options
 type Options struct {
 	CharsetDetectDisabled bool              `yaml:"charset-detect-disabled"`
 	MaxBodySize           int64             `yaml:"max-body-size"`
-	RetryTimes            int               `yaml:"retry-times"`
+	RetryTimes            int               `yaml:"retry-times"` // greater than or equal 0
 	RetryHTTPCodes        []int             `yaml:"retry-http-codes"`
 	Timeout               time.Duration     `yaml:"timeout"`
 	CachePolicy           Policy            `yaml:"cache-policy"`
@@ -56,14 +57,16 @@ type Options struct {
 	Jar                   *cookiejar.Jar    `yaml:"-"`
 }
 
-// NewFetcher returns a new Fetch instance
-func NewFetcher(opt Options) cloudcat.Fetch {
-	fetch := new(fetcher)
+// NewFetch returns a new cloudcat.Fetch instance
+func NewFetch(opt Options) cloudcat.Fetch {
+	fetch := new(fetchImpl)
 
 	fetch.charsetDetectDisabled = opt.CharsetDetectDisabled
 	fetch.maxBodySize = cloudcat.ZeroOr(opt.MaxBodySize, DefaultMaxBodySize)
 	fetch.timeout = cloudcat.ZeroOr(opt.Timeout, DefaultTimeout)
-	fetch.retryTimes = cloudcat.ZeroOr(opt.RetryTimes, DefaultRetryTimes)
+	if opt.RetryTimes >= 0 {
+		fetch.retryTimes = opt.RetryTimes
+	}
 	fetch.retryHTTPCodes = cloudcat.EmptyOr(opt.RetryHTTPCodes, DefaultRetryHTTPCodes)
 
 	transport := opt.RoundTripper
@@ -102,8 +105,13 @@ func DefaultRoundTripper() http.RoundTripper {
 // Do sends an HTTP request and returns an HTTP response, following
 // policy (such as redirects, cookies, auth) as configured on the
 // client.
-func (f *fetcher) Do(req *http.Request) (*http.Response, error) {
-	res, err := f.Client.Do(req)
+func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
+	for retry := 0; retry < f.retryTimes+1; retry++ {
+		res, err = f.Client.Do(req)
+		if err == nil && !slices.Contains(f.retryHTTPCodes, res.StatusCode) {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

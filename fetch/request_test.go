@@ -156,12 +156,12 @@ func createMultiPart(t *testing.T, data map[string]any) ([]byte, map[string]stri
 	return buf.Bytes(), map[string]string{"Content-Type": mpw.FormDataContentType()}
 }
 
-func newTestFetcher() *fetcher {
-	return NewFetcher(Options{
+func newTestFetcher() *fetchImpl {
+	return NewFetch(Options{
 		MaxBodySize:    DefaultMaxBodySize,
 		RetryTimes:     DefaultRetryTimes,
 		RetryHTTPCodes: DefaultRetryHTTPCodes,
 		Timeout:        DefaultTimeout,
 		CachePolicy:    RFC2616,
-	}).(*fetcher)
+	}).(*fetchImpl)
 }

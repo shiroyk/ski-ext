@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/andybalholm/brotli"
@@ -44,6 +45,42 @@ func TestCharsetFromBody(t *testing.T) {
 	res, _ := DoString(newFetcherDefault(), req)
 
 	assert.Equal(t, "Gültekin", res)
+}
+
+func TestRetry(t *testing.T) {
+	t.Parallel()
+	var times atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if times.Load() < DefaultRetryTimes {
+			times.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{226})
+		}
+	}))
+	defer ts.Close()
+
+	fetch := newFetcherDefault()
+
+	for i, s := range []string{"Status code retry", "Other error retry"} {
+		t.Run(s, func(t *testing.T) {
+			times.Store(0)
+			var req *http.Request
+			if i > 0 {
+				req, _ = NewRequest("GET", ts.URL, nil, map[string]string{"Location": "\x00"})
+			} else {
+				req, _ = NewRequest("HEAD", ts.URL, nil, nil)
+			}
+
+			res, err := fetch.Do(req)
+			if err != nil {
+				assert.ErrorContains(t, err, "Location")
+			} else {
+				assert.Equal(t, http.StatusOK, res.StatusCode)
+			}
+		})
+	}
 }
 
 func TestDecode(t *testing.T) {
@@ -100,7 +137,7 @@ func TestDecode(t *testing.T) {
 
 // newFetcherDefault creates new client with default options
 func newFetcherDefault() cloudcat.Fetch {
-	return NewFetcher(Options{
+	return NewFetch(Options{
 		MaxBodySize:    DefaultMaxBodySize,
 		RetryTimes:     DefaultRetryTimes,
 		RetryHTTPCodes: DefaultRetryHTTPCodes,
@@ -126,10 +163,10 @@ func TestFingerPrint(t *testing.T) {
 		"Dnt":                {"1"},
 		"User-Agent":         {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.5563.111 Safari/537.36"},
 		"Accept":             {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
-		"Sec-Fetch-Site":     {"none"},
-		"Sec-Fetch-Mode":     {"navigate"},
-		"Sec-Fetch-User":     {"?1"},
-		"Sec-Fetch-Dest":     {"document"},
+		"Sec-fetchImpl-Site": {"none"},
+		"Sec-fetchImpl-Mode": {"navigate"},
+		"Sec-fetchImpl-User": {"?1"},
+		"Sec-fetchImpl-Dest": {"document"},
 		"Accept-Encoding":    {"gzip, deflate, br"},
 		"Accept-Language":    {"en,en_US;q=0.9"},
 	}
