@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"text/template"
 
+	"github.com/shiroyk/cloudcat"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -154,6 +156,108 @@ func createMultiPart(t *testing.T, data map[string]any) ([]byte, map[string]stri
 		t.Fatal(err)
 	}
 	return buf.Bytes(), map[string]string{"Content-Type": mpw.FormDataContentType()}
+}
+
+var templateTestCase = []struct{ template, want string }{
+	{`CONNECT {{.url}}`, ""},
+	{`GET {{.url}} HTTP/1.1`, ""},
+	{`{{.url}}?page=1`, "page=1"},
+	{`{{.url}}{{if gt .page 1}}?page={{.page}}{{end}}`, "page=2"},
+	{`{{.url}}?key={{.data.key}}`, "key=foo"},
+	{`POST {{.url}}
+Content-Type: application/json
+
+{{ get "json" }}`, `{"key":"foo"}`},
+	{`POST {{.url}}
+Content-Type: application/x-www-form-urlencoded
+
+{{ get "form" }}`, `foo`},
+	{`POST {{.url}} HTTP/2.0
+Pragma: no-cache
+Content-Type: application/octet-stream
+Connection: close
+
+{{ get "image" }}`, "image/png"},
+	{`POST {{.url}} HTTP/1.0
+Content-Type: multipart/form-data; boundary=X-123456
+
+--X-123456
+Content-Disposition: form-data; name="key"
+
+foo
+--X-123456
+Content-Disposition: form-data; name="file"; filename="test.png"
+Content-Type: image/png
+
+{{ get "image" }}
+--X-123456--`, "foo-test.png-image/png"},
+}
+
+func TestNewTemplateRequest(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		var body []byte
+		contentType := r.Header.Get("Content-Type")
+		switch contentType {
+		case "application/octet-stream":
+			b, _ := io.ReadAll(r.Body)
+			body = []byte(http.DetectContentType(b))
+		case "application/x-www-form-urlencoded":
+			body = []byte(r.FormValue("key"))
+		case "multipart/form-data; boundary=X-123456":
+			if err := r.ParseMultipartForm(DefaultMaxBodySize); err != nil {
+				t.Fatal(err)
+			}
+			file, fh, err := r.FormFile("file")
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := io.ReadAll(file)
+			body = []byte(fmt.Sprintf("%s-%s-%s", r.FormValue("key"), fh.Filename, http.DetectContentType(data)))
+		default:
+			if r.Method == http.MethodGet {
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				body = []byte(r.Form.Encode())
+			} else {
+				body, _ = io.ReadAll(r.Body)
+			}
+		}
+		_, _ = w.Write(body)
+	})
+
+	f := newTestFetcher()
+	tplFuncs := templateFuncs()
+
+	ts := httptest.NewServer(h)
+	for _, tpl := range templateTestCase {
+		req, err := NewTemplateRequest(tplFuncs, tpl.template,
+			map[string]any{
+				"url":  ts.URL,
+				"page": 2,
+				"data": map[string]any{
+					"key": "foo",
+				},
+			})
+		if err != nil {
+			t.Error(err)
+		}
+
+		res, err := DoString(f, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, tpl.want, res)
+	}
+}
+
+func templateFuncs() template.FuncMap {
+	memCache := cloudcat.NewCache()
+	memCache.Set("json", []byte(`{"key":"foo"}`))
+	memCache.Set("form", []byte(`key=foo&value=bar`))
+	memCache.Set("image", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a})
+	return DefaultTemplateFuncMap(memCache)
 }
 
 func newTestFetcher() *fetchImpl {

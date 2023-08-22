@@ -20,6 +20,7 @@ type fetchImpl struct {
 	retryTimes            int
 	retryHTTPCodes        []int
 	timeout               time.Duration
+	headers               http.Header
 }
 
 const (
@@ -35,12 +36,12 @@ var (
 	// DefaultRetryHTTPCodes retry fetch.RequestConfig error status code
 	DefaultRetryHTTPCodes = []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, //nolint:lll
 		http.StatusGatewayTimeout, http.StatusRequestTimeout}
-	// DefaultHeaders defaults fetch.RequestConfig headers
-	DefaultHeaders = map[string]string{
-		"Accept":          "*/*",
-		"Accept-Encoding": "gzip, deflate, br",
-		"Accept-Language": "en-US,en;",
-		"User-Agent":      "cloudcat",
+	// DefaultHeaders defaults http headers
+	DefaultHeaders = http.Header{
+		"Accept":          {"*/*"},
+		"Accept-Encoding": {"gzip, deflate, br"},
+		"Accept-Language": {"en-US,en;"},
+		"User-Agent":      {"cloudcat"},
 	}
 )
 
@@ -52,6 +53,7 @@ type Options struct {
 	RetryHTTPCodes        []int             `yaml:"retry-http-codes"`
 	Timeout               time.Duration     `yaml:"timeout"`
 	CachePolicy           Policy            `yaml:"cache-policy"`
+	Headers               http.Header       `yaml:"headers"`
 	RoundTripper          http.RoundTripper `yaml:"-"`
 	Jar                   http.CookieJar    `yaml:"-"`
 }
@@ -67,6 +69,10 @@ func NewFetch(opt Options) cloudcat.Fetch {
 		fetch.retryTimes = opt.RetryTimes
 	}
 	fetch.retryHTTPCodes = cloudcat.EmptyOr(opt.RetryHTTPCodes, DefaultRetryHTTPCodes)
+	fetch.headers = opt.Headers
+	if len(fetch.headers) == 0 {
+		fetch.headers = DefaultHeaders
+	}
 
 	transport := opt.RoundTripper
 	if transport == nil {
@@ -105,6 +111,11 @@ func DefaultRoundTripper() http.RoundTripper {
 // policy (such as redirects, cookies, auth) as configured on the
 // client.
 func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
+	for k, v := range f.headers {
+		if _, ok := req.Header[k]; !ok {
+			req.Header[k] = v
+		}
+	}
 	for retry := 0; retry < f.retryTimes+1; retry++ {
 		res, err = f.Client.Do(req)
 		if err == nil && !slices.Contains(f.retryHTTPCodes, res.StatusCode) {
