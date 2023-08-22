@@ -2374,25 +2374,6 @@ func authorityAddr(scheme string, authority string) (addr string) {
 	return net.JoinHostPort(host, port)
 }
 
-const (
-	// ClientPreface is the string that must be sent by new
-	// connections from clients.
-	ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-
-	// NextProtoTLS is the NPN/ALPN protocol negotiated during
-	// HTTP/2's TLS setup.
-	NextProtoTLS = "h2"
-
-	// https://httpwg.org/specs/rfc7540.html#SettingValues
-	initialHeaderTableSize = 4096
-
-	initialWindowSize = 65535 // 6.9.2 Initial Flow Control Window Size
-)
-
-var (
-	clientPreface = []byte(ClientPreface)
-)
-
 type Options struct {
 	// HeaderOrder is for ResponseWriter.Header map keys
 	// that, if present, defines a header order that will be used to

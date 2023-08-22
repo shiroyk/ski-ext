@@ -67,7 +67,7 @@ func cacheKey(req *http.Request) string {
 // CachedResponse returns the cached http.Response for req if present, and nil
 // otherwise.
 func CachedResponse(c cloudcat.Cache, req *http.Request) (resp *http.Response, err error) {
-	cachedVal, ok := c.Get(cacheKey(req))
+	cachedVal, ok := c.Get(cacheKey(req), cloudcat.CacheOptions{Context: req.Context()})
 	if !ok {
 		return
 	}
@@ -119,7 +119,7 @@ func (t *CacheTransport) RoundTripDummy(req *http.Request) (resp *http.Response,
 		cachedResp, err = CachedResponse(t.Cache, req)
 	} else {
 		// Need to invalidate an existing value
-		t.Cache.Del(cacheKey)
+		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
 	}
 
 	transport := t.Transport
@@ -144,7 +144,7 @@ func (t *CacheTransport) RoundTripDummy(req *http.Request) (resp *http.Response,
 			t.Cache.Set(cacheKey, respBytes, cloudcat.CacheOptions{Context: req.Context()})
 		}
 	} else {
-		t.Cache.Del(cacheKey)
+		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
 	}
 	return resp, nil
 }
@@ -166,7 +166,7 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 		cachedResp, err = CachedResponse(t.Cache, req)
 	} else {
 		// Need to invalidate an existing value
-		t.Cache.Del(cacheKey)
+		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
 	}
 
 	transport := t.Transport
@@ -229,7 +229,7 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 			return cachedResp, nil
 		default:
 			if err != nil || resp.StatusCode != http.StatusOK {
-				t.Cache.Del(cacheKey)
+				t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
 			}
 			if err != nil {
 				return nil, err
@@ -277,7 +277,7 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 			}
 		}
 	} else {
-		t.Cache.Del(cacheKey)
+		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
 	}
 	return resp, nil
 }
