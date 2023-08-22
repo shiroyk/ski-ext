@@ -266,6 +266,5 @@ func newTestFetcher() *fetchImpl {
 		RetryTimes:     DefaultRetryTimes,
 		RetryHTTPCodes: DefaultRetryHTTPCodes,
 		Timeout:        DefaultTimeout,
-		CachePolicy:    RFC2616,
 	}).(*fetchImpl)
 }

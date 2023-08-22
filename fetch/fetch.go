@@ -52,7 +52,6 @@ type Options struct {
 	RetryTimes            int               `yaml:"retry-times"` // greater than or equal 0
 	RetryHTTPCodes        []int             `yaml:"retry-http-codes"`
 	Timeout               time.Duration     `yaml:"timeout"`
-	CachePolicy           Policy            `yaml:"cache-policy"`
 	Headers               http.Header       `yaml:"headers"`
 	RoundTripper          http.RoundTripper `yaml:"-"`
 	Jar                   http.CookieJar    `yaml:"-"`
@@ -65,7 +64,7 @@ func NewFetch(opt Options) cloudcat.Fetch {
 	fetch.charsetDetectDisabled = opt.CharsetDetectDisabled
 	fetch.maxBodySize = cloudcat.ZeroOr(opt.MaxBodySize, DefaultMaxBodySize)
 	fetch.timeout = cloudcat.ZeroOr(opt.Timeout, DefaultTimeout)
-	if opt.RetryTimes >= 0 {
+	if opt.RetryTimes > 0 {
 		fetch.retryTimes = opt.RetryTimes
 	}
 	fetch.retryHTTPCodes = cloudcat.EmptyOr(opt.RetryHTTPCodes, DefaultRetryHTTPCodes)
