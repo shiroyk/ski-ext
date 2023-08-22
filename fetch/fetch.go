@@ -130,12 +130,9 @@ func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
 	bodyReader := io.LimitReader(res.Body, f.maxBodySize)
 
 	if res.Request.Method != http.MethodHead { //nolint:nestif
-		if encoding := res.Header.Get("Content-Encoding"); encoding != "" {
-			bodyReader, err = DecodeReader(encoding, bodyReader)
-			if err != nil {
-				return nil, err
-			}
-			res.Body = io.NopCloser(bodyReader)
+		res, err = DecodeResponse(res)
+		if err != nil {
+			return nil, err
 		}
 
 		if res.ContentLength > 0 {

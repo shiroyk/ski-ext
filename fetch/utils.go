@@ -35,25 +35,36 @@ func DoByte(fetch cloudcat.Fetch, req *http.Request) ([]byte, error) {
 	return body, nil
 }
 
-// DecodeReader decode Content-Encoding from HTTP header (gzip, deflate, br) encodings.
-func DecodeReader(encoding string, reader io.Reader) (io.Reader, error) {
+// DecodeResponse decode Content-Encoding from HTTP header (gzip, deflate, br) encodings.
+func DecodeResponse(res *http.Response) (*http.Response, error) {
 	// In the order decompressed
-	var bodyReader = reader
-	var err error
+	encoding := res.Header.Get("Content-Encoding")
+	if encoding == "" {
+		return res, nil
+	}
+	var (
+		body = res.Body
+		err  error
+	)
 	for _, encode := range strings.Split(encoding, ",") {
 		switch strings.TrimSpace(encode) {
 		case "deflate":
-			bodyReader, err = zlib.NewReader(reader)
+			body, err = zlib.NewReader(body)
 		case "gzip":
-			bodyReader, err = gzip.NewReader(reader)
+			body, err = gzip.NewReader(body)
 		case "br":
-			bodyReader = brotli.NewReader(reader)
+			body = io.NopCloser(brotli.NewReader(body))
 		default:
 			err = fmt.Errorf("unsupported compression type %s", encode)
 		}
 		if err != nil {
 			return nil, err
 		}
+		res.Body = body
+		res.Header.Del("Content-Encoding")
+		res.Header.Del("Content-Length")
+		res.ContentLength = -1
+		res.Uncompressed = true
 	}
-	return bodyReader, nil
+	return res, nil
 }
