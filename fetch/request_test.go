@@ -164,6 +164,7 @@ var templateTestCase = []struct{ template, want string }{
 	{`{{.url}}?page=1`, "page=1"},
 	{`{{.url}}{{if gt .page 1}}?page={{.page}}{{end}}`, "page=2"},
 	{`{{.url}}?key={{.data.key}}`, "key=foo"},
+	{`{{.url}}?key={{.novalue}}`, "key="},
 	{`POST {{.url}}
 Content-Type: application/json
 

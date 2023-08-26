@@ -74,8 +74,10 @@ func NewTemplateRequest(funcs template.FuncMap, tpl string, arg any) (*http.Requ
 	if err = tmp.Execute(buf, arg); err != nil {
 		return nil, err
 	}
+	// https://github.com/golang/go/issues/24963
+	novalue := strings.ReplaceAll(buf.String(), "<no value>", "")
 
-	tp := newTextprotoReader(bufio.NewReader(buf))
+	tp := newTextprotoReader(bufio.NewReader(strings.NewReader(novalue)))
 
 	// First line: GET /index.html HTTP/1.0
 	var s string
