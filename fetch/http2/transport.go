@@ -3,6 +3,8 @@ package http2
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/rand"
 	cryptotls "crypto/tls"
@@ -22,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/refraction-networking/utls"
 	"golang.org/x/exp/slices"
 	"golang.org/x/net/http/httpguts"
@@ -2538,6 +2541,14 @@ type Transport struct {
 	connPoolOrDef ClientConnPool // non-nil version of ConnPool
 }
 
+type WarpReadCloser struct {
+	RC io.ReadCloser
+	R  io.Reader
+}
+
+func (r *WarpReadCloser) Read(p []byte) (n int, err error) { return r.R.Read(p) }
+func (r *WarpReadCloser) Close() error                     { return r.RC.Close() }
+
 // ConfigureTransports configures a net/http HTTP/1 Transport to use HTTP/2.
 // It returns a new HTTP/2 Transport for further configuration.
 // It returns an error if t1 has already been HTTP/2-enabled.
@@ -2556,6 +2567,39 @@ func ConfigureTransports(t1 *http.Transport, opts ...Options) *Transport {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := t.roundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	encoding := res.Header.Get("Content-Encoding")
+	if encoding == "" {
+		return res, nil
+	}
+	body := res.Body
+	for _, encode := range strings.Split(encoding, ",") {
+		switch strings.TrimSpace(encode) {
+		case "deflate":
+			body, err = zlib.NewReader(body)
+		case "gzip":
+			body, err = gzip.NewReader(body)
+		case "br":
+			body = &WarpReadCloser{body, brotli.NewReader(body)}
+		default:
+			return res, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		res.Body = body
+		res.Header.Del("Content-Encoding")
+		res.Header.Del("Content-Length")
+		res.ContentLength = -1
+		res.Uncompressed = true
+	}
+	return res, nil
+}
+
+func (t *Transport) roundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme != "https" {
 		if t.t1 == nil {
 			return http.DefaultTransport.RoundTrip(req)

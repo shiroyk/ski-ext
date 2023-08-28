@@ -62,7 +62,7 @@ func NewFetch(opt Options) cloudcat.Fetch {
 	fetch := new(fetchImpl)
 
 	fetch.charsetDetectDisabled = opt.CharsetDetectDisabled
-	fetch.maxBodySize = cloudcat.ZeroOr(opt.MaxBodySize, DefaultMaxBodySize)
+	fetch.maxBodySize = opt.MaxBodySize
 	fetch.timeout = cloudcat.ZeroOr(opt.Timeout, DefaultTimeout)
 	if opt.RetryTimes > 0 {
 		fetch.retryTimes = opt.RetryTimes
@@ -98,6 +98,7 @@ func DefaultRoundTripper() http.RoundTripper {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		DisableCompression:    true,
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -125,24 +126,22 @@ func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
 		return nil, err
 	}
 
-	// Limit response body reading
-	bodyReader := io.LimitReader(res.Body, f.maxBodySize)
+	body := res.Body
+	if f.maxBodySize > 0 {
+		// Limit response body reading
+		body = &http2.WarpReadCloser{RC: body, R: io.LimitReader(res.Body, f.maxBodySize)}
+	}
 
-	if res.Request.Method != http.MethodHead { //nolint:nestif
-		res, err = DecodeResponse(res)
-		if err != nil {
-			return nil, err
-		}
-
+	if res.Request.Method != http.MethodHead {
 		if res.ContentLength > 0 {
 			if !f.charsetDetectDisabled {
 				contentType := req.Header.Get("Content-Type")
-				bodyReader, err = charset.NewReader(bodyReader, contentType)
+				cr, err := charset.NewReader(body, contentType)
 				if err != nil {
 					return nil, fmt.Errorf("charset detection error on content-type %s: %w", contentType, err)
 				}
+				res.Body = &http2.WarpReadCloser{RC: body, R: cr}
 			}
-			res.Body = io.NopCloser(bodyReader)
 		}
 	}
 
