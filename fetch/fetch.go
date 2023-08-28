@@ -15,12 +15,12 @@ import (
 
 type fetchImpl struct {
 	*http.Client
-	charsetDetectDisabled bool
-	maxBodySize           int64
-	retryTimes            int
-	retryHTTPCodes        []int
-	timeout               time.Duration
-	headers               http.Header
+	charsetAutoDetect bool
+	maxBodySize       int64
+	retryTimes        int
+	retryHTTPCodes    []int
+	timeout           time.Duration
+	headers           http.Header
 }
 
 const (
@@ -47,21 +47,21 @@ var (
 
 // Options The fetchImpl instance options
 type Options struct {
-	CharsetDetectDisabled bool              `yaml:"charset-detect-disabled"`
-	MaxBodySize           int64             `yaml:"max-body-size"`
-	RetryTimes            int               `yaml:"retry-times"` // greater than or equal 0
-	RetryHTTPCodes        []int             `yaml:"retry-http-codes"`
-	Timeout               time.Duration     `yaml:"timeout"`
-	Headers               http.Header       `yaml:"headers"`
-	RoundTripper          http.RoundTripper `yaml:"-"`
-	Jar                   http.CookieJar    `yaml:"-"`
+	CharsetAutoDetect bool              `yaml:"charset-auto-detect"`
+	MaxBodySize       int64             `yaml:"max-body-size"`
+	RetryTimes        int               `yaml:"retry-times"` // greater than or equal 0
+	RetryHTTPCodes    []int             `yaml:"retry-http-codes"`
+	Timeout           time.Duration     `yaml:"timeout"`
+	Headers           http.Header       `yaml:"headers"`
+	RoundTripper      http.RoundTripper `yaml:"-"`
+	Jar               http.CookieJar    `yaml:"-"`
 }
 
 // NewFetch returns a new cloudcat.Fetch instance
 func NewFetch(opt Options) cloudcat.Fetch {
 	fetch := new(fetchImpl)
 
-	fetch.charsetDetectDisabled = opt.CharsetDetectDisabled
+	fetch.charsetAutoDetect = opt.CharsetAutoDetect
 	fetch.maxBodySize = opt.MaxBodySize
 	fetch.timeout = cloudcat.ZeroOr(opt.Timeout, DefaultTimeout)
 	if opt.RetryTimes > 0 {
@@ -134,7 +134,7 @@ func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
 
 	if res.Request.Method != http.MethodHead {
 		if res.ContentLength > 0 {
-			if !f.charsetDetectDisabled {
+			if f.charsetAutoDetect {
 				contentType := req.Header.Get("Content-Type")
 				cr, err := charset.NewReader(body, contentType)
 				if err != nil {
