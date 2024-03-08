@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shiroyk/cloudcat"
+	"github.com/shiroyk/ski"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,9 +33,7 @@ func (c *fakeClock) since(_ time.Time) time.Duration {
 
 // NewMemoryCacheTransport returns a new CacheTransport using the in-memory cache implementation
 func NewMemoryCacheTransport() *CacheTransport {
-	c := cloudcat.NewCache()
-	t := NewTransport(c)
-	return t
+	return NewCacheTransport(ski.NewCache())
 }
 
 func TestMain(m *testing.M) {
@@ -178,7 +176,7 @@ func teardown() {
 }
 
 func resetTest() {
-	s.transport.Cache = cloudcat.NewCache()
+	s.transport.Cache = ski.NewCache()
 	clock = &realClock{}
 }
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shiroyk/cloudcat"
+	"github.com/shiroyk/ski"
 )
 
 // (This implementation code copyright geziyor authors: https://github.com/geziyor/geziyor)
@@ -51,7 +51,7 @@ type CacheTransport struct {
 	// The RoundTripper interface actually used to make requests
 	// If nil, http.DefaultTransport is used
 	Transport http.RoundTripper
-	Cache     cloudcat.Cache
+	Cache     ski.Cache
 	// If true, responses returned from the cache will be given an extra header, X-From-Cache
 	MarkCachedResponses bool
 }
@@ -64,21 +64,21 @@ func cacheKey(req *http.Request) string {
 	return req.Method + " " + req.URL.String()
 }
 
-// CachedResponse returns the cached http.Response for req if present, and nil
+// cachedResponse returns the cached http.Response for req if present, and nil
 // otherwise.
-func CachedResponse(c cloudcat.Cache, req *http.Request) (resp *http.Response, err error) {
-	cachedVal, ok := c.Get(cacheKey(req), cloudcat.CacheOptions{Context: req.Context()})
-	if !ok {
-		return
+func cachedResponse(c ski.Cache, req *http.Request) (resp *http.Response, err error) {
+	cachedVal, err := c.Get(req.Context(), cacheKey(req))
+	if err != nil {
+		return nil, err
 	}
 
 	b := bytes.NewBuffer(cachedVal)
 	return http.ReadResponse(bufio.NewReader(b), req)
 }
 
-// NewTransport returns new CacheTransport with the
+// NewCacheTransport returns new CacheTransport with the
 // provided Cache implementation and MarkCachedResponses set to true
-func NewTransport(c cloudcat.Cache) *CacheTransport {
+func NewCacheTransport(c ski.Cache) *CacheTransport {
 	return &CacheTransport{
 		Policy:              RFC2616,
 		Cache:               c,
@@ -116,10 +116,10 @@ func (t *CacheTransport) RoundTripDummy(req *http.Request) (resp *http.Response,
 	cacheable := (req.Method == "GET" || req.Method == "HEAD") && req.Header.Get("range") == ""
 	var cachedResp *http.Response
 	if cacheable {
-		cachedResp, err = CachedResponse(t.Cache, req)
+		cachedResp, err = cachedResponse(t.Cache, req)
 	} else {
 		// Need to invalidate an existing value
-		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
+		_ = t.Cache.Del(req.Context(), cacheKey)
 	}
 
 	transport := t.Transport
@@ -141,10 +141,10 @@ func (t *CacheTransport) RoundTripDummy(req *http.Request) (resp *http.Response,
 	if cacheable {
 		respBytes, err := httputil.DumpResponse(resp, true)
 		if err == nil {
-			t.Cache.Set(cacheKey, respBytes, cloudcat.CacheOptions{Context: req.Context()})
+			_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
 		}
 	} else {
-		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
+		_ = t.Cache.Del(req.Context(), cacheKey)
 	}
 	return resp, nil
 }
@@ -163,10 +163,10 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 	cacheable := (req.Method == "GET" || req.Method == "HEAD") && req.Header.Get("range") == ""
 	var cachedResp *http.Response
 	if cacheable {
-		cachedResp, err = CachedResponse(t.Cache, req)
+		cachedResp, err = cachedResponse(t.Cache, req)
 	} else {
 		// Need to invalidate an existing value
-		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
+		_ = t.Cache.Del(req.Context(), cacheKey)
 	}
 
 	transport := t.Transport
@@ -229,7 +229,7 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 			return cachedResp, nil
 		default:
 			if err != nil || resp.StatusCode != http.StatusOK {
-				t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
+				_ = t.Cache.Del(req.Context(), cacheKey)
 			}
 			if err != nil {
 				return nil, err
@@ -266,18 +266,18 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 					resp.Body = io.NopCloser(r)
 					respBytes, err := httputil.DumpResponse(&resp, true)
 					if err == nil {
-						t.Cache.Set(cacheKey, respBytes, cloudcat.CacheOptions{Context: req.Context()})
+						_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
 					}
 				},
 			}
 		default:
 			respBytes, err := httputil.DumpResponse(resp, true)
 			if err == nil {
-				t.Cache.Set(cacheKey, respBytes, cloudcat.CacheOptions{Context: req.Context()})
+				_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
 			}
 		}
 	} else {
-		t.Cache.Del(cacheKey, cloudcat.CacheOptions{Context: req.Context()})
+		_ = t.Cache.Del(req.Context(), cacheKey)
 	}
 	return resp, nil
 }
@@ -285,8 +285,8 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 // ErrNoDateHeader indicates that the HTTP headers contained no Date header.
 var ErrNoDateHeader = errors.New("no Date header")
 
-// Date parses and returns the value of the Date header.
-func Date(respHeaders http.Header) (date time.Time, err error) {
+// parserDate parses and returns the value of the Date header.
+func parserDate(respHeaders http.Header) (date time.Time, err error) {
 	dateHeader := respHeaders.Get("date")
 	if dateHeader == "" {
 		err = ErrNoDateHeader
@@ -330,7 +330,7 @@ func getFreshness(respHeaders, reqHeaders http.Header) (freshness int) {
 		return fresh
 	}
 
-	date, err := Date(respHeaders)
+	date, err := parserDate(respHeaders)
 	if err != nil {
 		return stale
 	}
@@ -429,7 +429,7 @@ func canStaleOnError(respHeaders, reqHeaders http.Header) bool {
 	}
 
 	if lifetime >= 0 {
-		date, err := Date(respHeaders)
+		date, err := parserDate(respHeaders)
 		if err != nil {
 			return false
 		}

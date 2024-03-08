@@ -64,6 +64,7 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 	// TODO(dneil): Dial a new connection when t.DisableKeepAlives is set?
 	if isConnectionCloseRequest(req) && dialOnMiss {
 		// It gets its own connection.
+		traceGetConn(req, addr)
 		const singleUse = true
 		cc, err := p.t.dialClientConn(req.Context(), addr, singleUse)
 		if err != nil {
@@ -75,6 +76,12 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 		p.mu.Lock()
 		for _, cc := range p.conns[addr] {
 			if cc.ReserveNewRequest() {
+				// When a connection is presented to us by the net/http package,
+				// the GetConn hook has already been called.
+				// Don't call it a second time here.
+				if !cc.getConnCalled {
+					traceGetConn(req, addr)
+				}
 				cc.getConnCalled = false
 				p.mu.Unlock()
 				return cc, nil
@@ -84,6 +91,7 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 			p.mu.Unlock()
 			return nil, ErrNoCachedConn
 		}
+		traceGetConn(req, addr)
 		call := p.getStartDialLocked(req.Context(), addr)
 		p.mu.Unlock()
 		<-call.done

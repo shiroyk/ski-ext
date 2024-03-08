@@ -1,10 +1,10 @@
 package browser
 
 import (
-	"github.com/dop251/goja"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/shiroyk/cloudcat/js"
+	"github.com/grafana/sobek"
+	"github.com/shiroyk/ski/js"
 )
 
 // Element represents the DOM element
@@ -37,7 +37,7 @@ func (els Elements) Empty() bool {
 }
 
 // NewElement creates a new Element mapping
-func NewElement(ele *rod.Element, vm *goja.Runtime) goja.Value {
+func NewElement(ele *rod.Element, vm *sobek.Runtime) sobek.Value {
 	return vm.ToValue(mappingElement(Element{ele}))
 }
 
@@ -119,7 +119,7 @@ func mappingElement(element Element) map[string]any {
 }
 
 // BackgroundImage returns the css background-image of the element
-func (el *Element) BackgroundImage(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) BackgroundImage(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	image, err := el.Element.BackgroundImage()
 	if err != nil {
 		js.Throw(vm, err)
@@ -128,7 +128,7 @@ func (el *Element) BackgroundImage(_ goja.FunctionCall, vm *goja.Runtime) (ret g
 }
 
 // ContainsElement check if the target is equal or inside the element.
-func (el *Element) ContainsElement(element goja.Value) (bool, error) {
+func (el *Element) ContainsElement(element sobek.Value) (bool, error) {
 	value := element.Export().(Element)
 	return el.Element.ContainsElement(value.Element)
 }
@@ -139,7 +139,7 @@ func (el *Element) ContainsElement(element goja.Value) (bool, error) {
 // The returned proto.DOMNode.NodeID will always be empty, because NodeID is not stable (when proto.DOMDocumentUpdated
 // is fired all NodeID on the page will be reassigned to another value)
 // we don't recommend using the NodeID, instead, use the BackendNodeID to identify the element.
-func (el *Element) Describe(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Describe(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	depth := call.Argument(0).ToInteger()
 	pierce := call.Argument(1).ToBoolean()
 	describe, err := el.Element.Describe(int(depth), pierce)
@@ -159,7 +159,7 @@ func (el *Element) NElement(selector string) (any, error) {
 }
 
 // ElementByJS returns the element from the return value of the js
-func (el *Element) ElementByJS(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) ElementByJS(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	element, err := el.Element.ElementByJS(target.toRodEvalOptions())
 	if err != nil {
@@ -187,7 +187,7 @@ func (el *Element) Elements(selector string) (any, error) {
 }
 
 // ElementsByJS returns the elements from the return value of the js
-func (el *Element) ElementsByJS(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) ElementsByJS(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	elements, err := el.Element.ElementsByJS(target.toRodEvalOptions())
 	if err != nil {
@@ -206,13 +206,13 @@ func (el *Element) ElementsX(xpath string) (any, error) {
 }
 
 // Equal checks if the two elements are equal.
-func (el *Element) Equal(elm goja.Value) (bool, error) {
+func (el *Element) Equal(elm sobek.Value) (bool, error) {
 	value := elm.Export().(Element)
 	return el.Element.Equal(value.Element)
 }
 
 // Eval is a shortcut for Element.Evaluate with AwaitPromise, ByValue and AutoExp set to true.
-func (el *Element) Eval(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Eval(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	script := call.Argument(0).String()
 	args := make([]any, 0, len(call.Arguments)-1)
 	for _, value := range call.Arguments[1:] {
@@ -228,7 +228,7 @@ func (el *Element) Eval(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Valu
 }
 
 // Evaluate is just a shortcut of Page.Evaluate with This set to current element.
-func (el *Element) Evaluate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Evaluate(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	res, err := el.Element.Evaluate(target.toRodEvalOptions())
 	if err != nil {
@@ -238,8 +238,8 @@ func (el *Element) Evaluate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.
 }
 
 // Frame creates a page instance that represents the iframe
-func (el *Element) Frame(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
-	return vm.ToValue(mappingPage(Page{el.Element.MustFrame().Context(js.VMContext(vm))}))
+func (el *Element) Frame(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
+	return vm.ToValue(mappingPage(Page{el.Element.MustFrame().Context(js.Context(vm))}))
 }
 
 // Has an element that matches the css selector
@@ -272,7 +272,7 @@ func (el *Element) HasX(selector string) (bool, any, error) {
 // Interactable checks if the element is interactable with cursor.
 // The cursor can be mouse, finger, stylus, etc.
 // If not interactable err will be ErrNotInteractable, such as when covered by a modal,
-func (el *Element) Interactable(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Interactable(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	interactable, err := el.Element.Interactable()
 	if err != nil {
 		js.Throw(vm, err)
@@ -306,7 +306,7 @@ func (el *Element) Previous() any {
 }
 
 // Resource returns the "src" content of current element. Such as the jpg of <img src="a.jpg">
-func (el *Element) Resource(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Resource(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	image, err := el.Element.Resource()
 	if err != nil {
 		js.Throw(vm, err)
@@ -315,9 +315,9 @@ func (el *Element) Resource(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Val
 }
 
 // Screenshot of the area of the element
-func (el *Element) Screenshot(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Screenshot(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	var quality int
-	if !goja.IsUndefined(call.Argument(1)) {
+	if !sobek.IsUndefined(call.Argument(1)) {
 		quality = int(call.Argument(1).ToInteger())
 	}
 	target := toGoStruct[proto.PageCaptureScreenshotFormat](call.Argument(0), vm)
@@ -340,7 +340,7 @@ func (el *Element) ShadowRoot() any {
 //	  ____________          ____________
 //	 /        ___/    =    /___________/    +     _________
 //	/________/                                   /________/
-func (el *Element) Shape(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Shape(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	shape, err := el.Element.Shape()
 	if err != nil {
 		js.Throw(vm, err)
@@ -349,18 +349,18 @@ func (el *Element) Shape(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value)
 }
 
 // Wait until the js returns true
-func (el *Element) Wait(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) Wait(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	err := el.Element.Wait(target.toRodEvalOptions())
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // WaitInteractable waits for the element to be interactable.
 // It will try to scroll to the element on each try.
-func (el *Element) WaitInteractable(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (el *Element) WaitInteractable(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	interactable, err := el.Element.WaitInteractable()
 	if err != nil {
 		js.Throw(vm, err)

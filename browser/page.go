@@ -4,11 +4,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/dop251/goja"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/devices"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/shiroyk/cloudcat/js"
+	"github.com/grafana/sobek"
+	"github.com/shiroyk/ski/js"
 )
 
 // Page the rod.Page mapping
@@ -17,8 +17,8 @@ type Page struct {
 }
 
 // NewPage creates a new Page mapping
-func NewPage(p *rod.Page, vm *goja.Runtime) goja.Value {
-	return vm.ToValue(mappingPage(Page{p}))
+func NewPage(p *rod.Page, rt *sobek.Runtime) sobek.Value {
+	return rt.ToValue(mappingPage(Page{p.Context(js.Context(rt))}))
 }
 
 func mappingPage(page Page) map[string]any {
@@ -26,7 +26,7 @@ func mappingPage(page Page) map[string]any {
 		"activate":             page.Activate,
 		"addScriptTag":         page.AddScriptTag,
 		"addStyleTag":          page.AddStyleTag,
-		"browser":              func() Browser { return Browser{page.Browser()} },
+		"browser":              func() browser { return browser{page.Browser()} },
 		"close":                page.Close,
 		"cookies":              page.Cookies,
 		"eachEvent":            page.EachEvent,
@@ -121,7 +121,7 @@ func (p *Page) Activate() (any, error) {
 
 // Cookies returns the page cookies. By default it will return the cookies for current page.
 // The urls is the list of URLs for which applicable cookies will be fetched.
-func (p *Page) Cookies(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Cookies(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	urls := call.Argument(0).Export().([]string)
 	cookies, err := p.Page.Cookies(urls)
 	if err != nil {
@@ -144,7 +144,7 @@ func (p *Page) Element(selector string) (any, error) {
 // If sleeper is nil, no retry will be performed.
 // By default, it will retry until the js function doesn't return null.
 // To customize the retry logic, check the examples of Page.Sleeper.
-func (p *Page) ElementByJS(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) ElementByJS(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	element, err := p.Page.ElementByJS(target.toRodEvalOptions())
 	if err != nil {
@@ -154,7 +154,7 @@ func (p *Page) ElementByJS(call goja.FunctionCall, vm *goja.Runtime) (ret goja.V
 }
 
 // ElementFromNode creates an Element from the node, NodeID or BackendNodeID must be specified.
-func (p *Page) ElementFromNode(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) ElementFromNode(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.DOMNode](call.Argument(0), vm)
 	element, err := p.Page.ElementFromNode(&target)
 	if err != nil {
@@ -164,7 +164,7 @@ func (p *Page) ElementFromNode(call goja.FunctionCall, vm *goja.Runtime) (ret go
 }
 
 // ElementFromObject creates an Element from the remote object id.
-func (p *Page) ElementFromObject(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) ElementFromObject(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.RuntimeRemoteObject](call.Argument(0), vm)
 	element, err := p.Page.ElementFromObject(&target)
 	if err != nil {
@@ -203,7 +203,7 @@ func (p *Page) Elements(selector string) (Elements, error) {
 }
 
 // ElementsByJS returns the elements from the return value of the js
-func (p *Page) ElementsByJS(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) ElementsByJS(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	elements, err := p.Page.ElementsByJS(target.toRodEvalOptions())
 	if err != nil {
@@ -232,7 +232,7 @@ func (p *Page) ElementX(xPath string) (any, error) {
 }
 
 // Evaluate js on the page.
-func (p *Page) Evaluate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Evaluate(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	res, err := p.Page.Evaluate(target.toRodEvalOptions())
 	if err != nil {
@@ -242,9 +242,9 @@ func (p *Page) Evaluate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Valu
 }
 
 // Emulate the device, such as iPhone9. If device is devices.Clear, it will clear the override.
-func (p *Page) Emulate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Emulate(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	device := devices.Clear
-	if !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
+	if !sobek.IsUndefined(call.Argument(0)) && !sobek.IsNull(call.Argument(0)) {
 		device = toGoStruct[devices.Device](call.Argument(0), vm)
 	}
 	p.MustEmulate(device)
@@ -252,7 +252,7 @@ func (p *Page) Emulate(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value
 }
 
 // Eval is a shortcut for Page.Evaluate with AwaitPromise, ByValue set to true.
-func (p *Page) Eval(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Eval(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	script := call.Argument(0).String()
 	args := make([]any, 0, len(call.Arguments)-1)
 	for _, value := range call.Arguments[1:] {
@@ -269,7 +269,7 @@ func (p *Page) Eval(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
 
 // GetResource content by the url. Such as image, css, html, etc.
 // Use the proto.PageGetResourceTree to list all the resources.
-func (p *Page) GetResource(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) GetResource(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	resource, err := p.Page.GetResource(call.Argument(0).String())
 	if err != nil {
 		js.Throw(vm, err)
@@ -279,7 +279,7 @@ func (p *Page) GetResource(call goja.FunctionCall, vm *goja.Runtime) (ret goja.V
 }
 
 // GetWindow position and size info
-func (p *Page) GetWindow(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) GetWindow(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	window, err := p.Page.GetWindow()
 	if err != nil {
 		js.Throw(vm, err)
@@ -296,7 +296,7 @@ func (p *Page) GetWindow(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value)
 //	page.element("button").click()
 //	wait()
 //	handle(true, "")
-func (p *Page) HandleDialog(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) HandleDialog(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	waitNative, handleNative := p.Page.MustHandleDialog()
 	obj := vm.NewObject()
 	_ = obj.Set("wait", func() any { return toJSObject(waitNative(), vm) })
@@ -332,7 +332,7 @@ func (p *Page) HasX(selector string) (bool, any, error) {
 }
 
 // Info of the page, such as the URL or title of the page
-func (p *Page) Info(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Info(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	info, err := p.Page.Info()
 	if err != nil {
 		js.Throw(vm, err)
@@ -341,7 +341,7 @@ func (p *Page) Info(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
 }
 
 // ObjectToJSON by object id
-func (p *Page) ObjectToJSON(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) ObjectToJSON(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.RuntimeRemoteObject](call.Argument(0), vm)
 	value, err := p.Page.ObjectToJSON(&target)
 	if err != nil {
@@ -351,7 +351,7 @@ func (p *Page) ObjectToJSON(call goja.FunctionCall, vm *goja.Runtime) (ret goja.
 }
 
 // PDF prints page as PDF
-func (p *Page) PDF(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) PDF(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.PagePrintToPDF](call.Argument(0), vm)
 	value, err := p.Page.PDF(&target)
 	if err != nil {
@@ -367,18 +367,18 @@ func (p *Page) PDF(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
 // Release the remote object. Usually, you don't need to call it.
 // When a page is closed or reloaded, all remote objects will be released automatically.
 // It's useful if the page never closes or reloads.
-func (p *Page) Release(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Release(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.RuntimeRemoteObject](call.Argument(0), vm)
 	if err := p.Page.Release(&target); err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // Screenshot captures the screenshot of current page.
-func (p *Page) Screenshot(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Screenshot(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	var fullPage bool
-	if !goja.IsUndefined(call.Argument(0)) {
+	if !sobek.IsUndefined(call.Argument(0)) {
 		fullPage = call.Argument(0).ToBoolean()
 	}
 	target := toGoStruct[proto.PageCaptureScreenshot](call.Argument(1), vm)
@@ -420,44 +420,44 @@ func (p *Page) Search(query string) (any, error) {
 }
 
 // SetCookies is similar to Browser.SetCookies .
-func (p *Page) SetCookies(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) SetCookies(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[[]*proto.NetworkCookieParam](call.Argument(0), vm)
 	err := p.Page.SetCookies(target)
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // SetUserAgent (browser brand, accept-language, etc) of the page.
 // If req is nil, a default user agent will be used, a typical mac chrome.
-func (p *Page) SetUserAgent(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) SetUserAgent(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.NetworkSetUserAgentOverride](call.Argument(0), vm)
 	err := p.Page.SetUserAgent(&target)
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // SetViewport overrides the values of device screen dimensions
-func (p *Page) SetViewport(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) SetViewport(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.EmulationSetDeviceMetricsOverride](call.Argument(0), vm)
 	err := p.Page.SetViewport(&target)
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // SetWindow location and size
-func (p *Page) SetWindow(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) SetWindow(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[proto.BrowserBounds](call.Argument(0), vm)
 	err := p.Page.SetWindow(&target)
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // Timeout returns a clone with the specified total timeout of all chained sub-operations
@@ -471,13 +471,13 @@ func (p *Page) Timeout(timeout string) (page *Page, err error) {
 }
 
 // Wait until the js returns true
-func (p *Page) Wait(call goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) Wait(call sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	target := toGoStruct[EvalOptions](call.Argument(0), vm)
 	err := p.Page.Wait(target.toRodEvalOptions())
 	if err != nil {
 		js.Throw(vm, err)
 	}
-	return goja.Undefined()
+	return sobek.Undefined()
 }
 
 // WaitIdle waits until the next window.requestIdleCallback is called.
@@ -490,12 +490,12 @@ func (p *Page) WaitIdle(timeout string) (err error) {
 }
 
 // WaitOpen waits for the next new page opened by the current one
-func (p *Page) WaitOpen(_ goja.FunctionCall, vm *goja.Runtime) (ret goja.Value) {
+func (p *Page) WaitOpen(_ sobek.FunctionCall, vm *sobek.Runtime) (ret sobek.Value) {
 	return vm.ToValue(func() (any, error) {
 		page, err := p.Page.WaitOpen()()
 		if err != nil {
 			return Page{}, err
 		}
-		return mappingPage(Page{page.Context(js.VMContext(vm))}), nil
+		return mappingPage(Page{page.Context(js.Context(vm))}), nil
 	})
 }

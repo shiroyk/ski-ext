@@ -3,12 +3,12 @@ package fetch
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sync/atomic"
 
-	"github.com/shiroyk/cloudcat/plugin"
-	"golang.org/x/exp/slog"
+	"github.com/shiroyk/ski"
 )
 
 type roundRobinProxy struct {
@@ -42,15 +42,11 @@ func newRoundRobinProxy(proxyURLs ...string) *roundRobinProxy {
 	return &roundRobinProxy{parsedProxyURLs, 0}
 }
 
-var requestProxyKey int
+var requestProxyKey byte
 
 // WithRoundRobinProxy returns a copy of parent context in which the proxies associated with context.
 func WithRoundRobinProxy(ctx context.Context, proxy ...string) context.Context {
 	if proxy == nil {
-		return ctx
-	}
-	if c, ok := ctx.(*plugin.Context); ok {
-		c.SetValue(&requestProxyKey, newRoundRobinProxy(proxy...))
 		return ctx
 	}
 	return context.WithValue(ctx, &requestProxyKey, newRoundRobinProxy(proxy...))
@@ -61,5 +57,5 @@ func ProxyFromRequest(req *http.Request) (*url.URL, error) {
 	if proxy := req.Context().Value(&requestProxyKey); proxy != nil {
 		return proxy.(*roundRobinProxy).getProxy()
 	}
-	return nil, nil
+	return ski.ProxyFromRequest(req)
 }

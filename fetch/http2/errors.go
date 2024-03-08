@@ -139,19 +139,6 @@ func (e headerFieldValueError) Error() string {
 	return fmt.Sprintf("invalid header field value for %q", string(e))
 }
 
-// noCachedConnError is the concrete type of ErrNoCachedConn, which
-// needs to be detected by net/http regardless of whether it's its
-// bundled version (in h2_bundle.go with a rewritten type name) or
-// from a user's x/net/http2. As such, as it has a unique method name
-// (IsHTTP2NoCachedConnError) that net/http sniffs for via func
-// isNoCachedConnError.
-type noCachedConnError struct{}
-
-func (noCachedConnError) IsHTTP2NoCachedConnError() {}
-func (noCachedConnError) Error() string             { return "http2: no cached connection was available" }
-
-var ErrNoCachedConn error = noCachedConnError{}
-
 var (
 	errMixPseudoHeaderTypes = errors.New("mix of request and response pseudo headers")
 	errPseudoAfterRegular   = errors.New("pseudo header field after regular")

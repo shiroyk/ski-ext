@@ -5,50 +5,48 @@ import (
 	"encoding/json"
 	"reflect"
 
-	"github.com/dop251/goja"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/shiroyk/cloudcat"
-	"github.com/shiroyk/cloudcat/js"
-	"github.com/shiroyk/cloudcat/plugin/jsmodule"
+	"github.com/grafana/sobek"
+	"github.com/shiroyk/ski/js"
 )
 
-// Module js module
-type Module struct{}
-
-// Exports returns module instance
-func (*Module) Exports() any {
-	return &Browser{cloudcat.MustResolve[*rod.Browser]()}
+func init() {
+	js.Register("browser", new(Browser))
 }
 
-func init() {
-	jsmodule.Register("browser", new(Module))
+type Browser struct{}
+
+func (Browser) Instantiate(rt *sobek.Runtime) (sobek.Value, error) {
+	return rt.ToValue(func(call sobek.ConstructorCall) *sobek.Object {
+		return rt.ToValue(&browser{rod.New().ControlURL(call.Argument(0).String()).MustConnect()}).ToObject(rt)
+	}), nil
 }
 
 // Browser module represents the browser. It doesn't depends on file system,
 // it should work with remote browser seamlessly.
-type Browser struct { //nolint:var-naming
-	browser *rod.Browser
+type browser struct { //nolint:var-naming
+	*rod.Browser
 }
 
 // Page returns a new page
-func (b *Browser) Page(call goja.FunctionCall, vm *goja.Runtime) goja.Value {
+func (b *browser) Page(call sobek.FunctionCall, rt *sobek.Runtime) sobek.Value {
 	if call.Argument(0).ExportType().Kind() == reflect.String {
-		page := b.browser.MustPage(call.Argument(0).String())
-		return vm.ToValue(Page{page.Context(js.VMContext(vm))})
+		page := b.MustPage(call.Argument(0).String())
+		return NewPage(page, rt)
 	}
 
-	target := toGoStruct[proto.TargetCreateTarget](call.Argument(0), vm)
-	page, err := b.browser.Page(target)
+	target := toGoStruct[proto.TargetCreateTarget](call.Argument(0), rt)
+	page, err := b.Browser.Page(target)
 	if err != nil {
-		js.Throw(vm, err)
+		js.Throw(rt, err)
 	}
-	return NewPage(page.Context(js.VMContext(vm)), vm)
+	return NewPage(page, rt)
 }
 
 // toGoStruct mapping the js object to golang struct.
-func toGoStruct[T any](value goja.Value, vm *goja.Runtime) (t T) {
-	if goja.IsUndefined(value) {
+func toGoStruct[T any](value sobek.Value, vm *sobek.Runtime) (t T) {
+	if sobek.IsUndefined(value) {
 		return
 	}
 	bytes, err := value.ToObject(vm).MarshalJSON()
@@ -63,9 +61,9 @@ func toGoStruct[T any](value goja.Value, vm *goja.Runtime) (t T) {
 }
 
 // toJSObject mapping the golang struct to js object.
-func toJSObject(value any, vm *goja.Runtime) goja.Value {
+func toJSObject(value any, vm *sobek.Runtime) sobek.Value {
 	if value == nil {
-		return goja.Undefined()
+		return sobek.Undefined()
 	}
 	bytes, err := json.Marshal(value)
 	if err != nil {

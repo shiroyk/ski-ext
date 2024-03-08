@@ -3,6 +3,7 @@ package fetch
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +13,15 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"text/template"
 	_ "unsafe"
 
-	"github.com/shiroyk/cloudcat"
+	"github.com/shiroyk/ski"
 )
 
 // NewRequest returns a new RequestConfig given a method, URL, optional body, optional headers.
+// Body type: slice, map, struct, string, []byte, io.Reader, fmt.Stringer
 func NewRequest(method, u string, body any, headers map[string]string) (*http.Request, error) {
 	var reqBody io.Reader = http.NoBody
 	if body != nil {
@@ -26,7 +29,7 @@ func NewRequest(method, u string, body any, headers map[string]string) (*http.Re
 		switch data := body.(type) {
 		default:
 			kind := reflect.ValueOf(body).Kind()
-			if kind != reflect.Struct && kind != reflect.Map {
+			if kind != reflect.Struct && kind != reflect.Map && kind != reflect.Array && kind != reflect.Slice {
 				break
 			}
 
@@ -43,6 +46,8 @@ func NewRequest(method, u string, body any, headers map[string]string) (*http.Re
 			reqBody = bytes.NewReader(j)
 		case io.Reader:
 			reqBody = data
+		case fmt.Stringer:
+			reqBody = bytes.NewBufferString(data.String())
 		case string:
 			reqBody = bytes.NewBufferString(data)
 		case []byte:
@@ -63,35 +68,38 @@ func NewRequest(method, u string, body any, headers map[string]string) (*http.Re
 	return req, nil
 }
 
-// NewTemplateRequest returns a new RequestConfig given a http template with argument.
-func NewTemplateRequest(funcs template.FuncMap, tpl string, arg any) (*http.Request, error) {
-	tmp, err := template.New("url").Funcs(funcs).Parse(tpl)
-	if err != nil {
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func freeBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	bufPool.Put(buf)
+}
+
+// NewTemplateRequest returns a new Request given a http template with argument.
+func NewTemplateRequest(tpl *template.Template, arg any) (*http.Request, error) {
+	buf := bufPool.Get().(*bytes.Buffer)
+	defer freeBuffer(buf)
+
+	if err := tpl.Execute(buf, arg); err != nil {
 		return nil, err
 	}
 
-	buf := new(bytes.Buffer)
-	if err = tmp.Execute(buf, arg); err != nil {
-		return nil, err
-	}
 	// https://github.com/golang/go/issues/24963
-	novalue := strings.ReplaceAll(buf.String(), "<no value>", "")
+	return ReadRequest(strings.ReplaceAll(buf.String(), "<no value>", ""))
+}
 
-	tp := newTextprotoReader(bufio.NewReader(strings.NewReader(novalue)))
+// ReadRequest returns a new RequestConfig given a http template with argument.
+func ReadRequest(request string) (req *http.Request, err error) {
+	tp := newTextprotoReader(bufio.NewReader(strings.NewReader(request)))
+	defer putTextprotoReader(tp)
 
 	// First line: GET /index.html HTTP/1.0
 	var s string
 	if s, err = tp.ReadLine(); err != nil {
 		return nil, err
 	}
-	defer func() {
-		putTextprotoReader(tp)
-		if errors.Is(err, io.EOF) {
-			err = io.ErrUnexpectedEOF
-		}
-	}()
 
-	req := new(http.Request)
+	req = &http.Request{Body: http.NoBody}
 	var rawURI string
 
 	req.Method, rawURI, req.Proto = parseRequestLine(s)
@@ -130,9 +138,11 @@ func NewTemplateRequest(funcs template.FuncMap, tpl string, arg any) (*http.Requ
 
 	req.Close = shouldClose(req.ProtoMajor, req.ProtoMinor, req.Header)
 
-	if req.Method != http.MethodHead || req.Body == nil {
+	if req.Method != http.MethodHead && tp.R.Buffered() > 0 {
 		// Read body and fix content-length
-		body := new(bytes.Buffer)
+		body := bufPool.Get().(*bytes.Buffer)
+		defer freeBuffer(body)
+
 		if _, err = tp.R.WriteTo(body); err != nil {
 			return nil, err
 		}
@@ -148,17 +158,11 @@ func NewTemplateRequest(funcs template.FuncMap, tpl string, arg any) (*http.Requ
 }
 
 // DefaultTemplateFuncMap The default template function map
-func DefaultTemplateFuncMap(cache cloudcat.Cache) template.FuncMap {
+func DefaultTemplateFuncMap(cache ski.Cache) template.FuncMap {
 	return template.FuncMap{
-		"get": func(key string) (ret string) {
-			if v, ok := cache.Get(key); ok {
-				return string(v)
-			}
-			return
-		},
-		"set": func(key string, value string) (ret string) {
-			cache.Set(key, []byte(value))
-			return
+		"get": func(key string) string {
+			v, _ := cache.Get(context.Background(), key)
+			return string(v)
 		},
 	}
 }
@@ -170,7 +174,7 @@ func parseRequestLine(line string) (method, requestURI, proto string) {
 	requestURI, proto, ok2 := strings.Cut(rest, " ")
 	if !ok1 {
 		// default GET request
-		return "GET", line, "HTTP/1.1"
+		return http.MethodGet, line, "HTTP/1.1"
 	}
 	if !ok2 {
 		return method, requestURI, "HTTP/1.1"

@@ -14,8 +14,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 	tls "github.com/refraction-networking/utls"
-	"github.com/shiroyk/cloudcat"
-	"github.com/shiroyk/cloudcat-ext/fetch/http2"
+	"github.com/shiroyk/ski"
+	"github.com/shiroyk/ski-ext/fetch/http2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -136,12 +136,13 @@ func TestDecode(t *testing.T) {
 }
 
 // newFetcherDefault creates new client with default options
-func newFetcherDefault() cloudcat.Fetch {
+func newFetcherDefault() ski.Fetch {
 	return NewFetch(Options{
-		MaxBodySize:    DefaultMaxBodySize,
-		RetryTimes:     DefaultRetryTimes,
-		RetryHTTPCodes: DefaultRetryHTTPCodes,
-		Timeout:        DefaultTimeout,
+		MaxBodySize:       DefaultMaxBodySize,
+		RetryTimes:        DefaultRetryTimes,
+		RetryHTTPCodes:    DefaultRetryHTTPCodes,
+		Timeout:           DefaultTimeout,
+		CharsetAutoDetect: true,
 	})
 }
 
@@ -193,13 +194,19 @@ func TestFingerPrint(t *testing.T) {
 	})
 
 	res, err := h2.RoundTrip(req)
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 	defer res.Body.Close()
 
 	b, err := io.ReadAll(res.Body)
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 	var data map[string]any
-	assert.NoError(t, json.Unmarshal(b, &data))
+	if !assert.NoError(t, json.Unmarshal(b, &data)) {
+		return
+	}
 
 	assert.Equal(t, data["http_version"], http2.NextProtoTLS)
 

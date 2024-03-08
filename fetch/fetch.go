@@ -5,11 +5,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"time"
 
-	"github.com/shiroyk/cloudcat"
-	"github.com/shiroyk/cloudcat-ext/fetch/http2"
-	"golang.org/x/exp/slices"
+	"github.com/shiroyk/ski"
+	"github.com/shiroyk/ski-ext/fetch/http2"
 	"golang.org/x/net/html/charset"
 )
 
@@ -39,9 +39,8 @@ var (
 	// DefaultHeaders defaults http headers
 	DefaultHeaders = http.Header{
 		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate, br"},
 		"Accept-Language": {"en-US,en;"},
-		"User-Agent":      {"cloudcat"},
+		"User-Agent":      {"ski"},
 	}
 )
 
@@ -57,18 +56,23 @@ type Options struct {
 	Jar               http.CookieJar    `yaml:"-"`
 }
 
-// NewFetch returns a new cloudcat.Fetch instance
-func NewFetch(opt Options) cloudcat.Fetch {
-	fetch := new(fetchImpl)
+// NewFetch returns a new ski.Fetch instance
+func NewFetch(opt Options) ski.Fetch {
+	fetch := &fetchImpl{
+		timeout:        opt.Timeout,
+		retryHTTPCodes: opt.RetryHTTPCodes,
+		headers:        opt.Headers,
+		retryTimes:     opt.RetryTimes,
+	}
 
 	fetch.charsetAutoDetect = opt.CharsetAutoDetect
 	fetch.maxBodySize = opt.MaxBodySize
-	fetch.timeout = cloudcat.ZeroOr(opt.Timeout, DefaultTimeout)
-	if opt.RetryTimes > 0 {
-		fetch.retryTimes = opt.RetryTimes
+	if opt.Timeout == 0 {
+		fetch.timeout = DefaultTimeout
 	}
-	fetch.retryHTTPCodes = cloudcat.EmptyOr(opt.RetryHTTPCodes, DefaultRetryHTTPCodes)
-	fetch.headers = opt.Headers
+	if len(opt.RetryHTTPCodes) == 0 {
+		fetch.retryHTTPCodes = DefaultRetryHTTPCodes
+	}
 	if len(fetch.headers) == 0 {
 		fetch.headers = DefaultHeaders
 	}
@@ -81,10 +85,7 @@ func NewFetch(opt Options) cloudcat.Fetch {
 	fetch.Client = &http.Client{
 		Transport: transport,
 		Timeout:   fetch.timeout,
-	}
-
-	if opt.Jar != nil {
-		fetch.Client.Jar = opt.Jar
+		Jar:       opt.Jar,
 	}
 
 	return fetch
@@ -98,7 +99,7 @@ func DefaultRoundTripper() http.RoundTripper {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		DisableCompression:    true,
+		DisableCompression:    false,
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -129,7 +130,7 @@ func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
 	body := res.Body
 	if f.maxBodySize > 0 {
 		// Limit response body reading
-		body = &http2.WarpReadCloser{RC: body, R: io.LimitReader(res.Body, f.maxBodySize)}
+		body = &http2.WarpReadCloser{Reader: io.LimitReader(res.Body, f.maxBodySize), Closer: body.Close}
 	}
 
 	if res.Request.Method != http.MethodHead {
@@ -140,7 +141,7 @@ func (f *fetchImpl) Do(req *http.Request) (res *http.Response, err error) {
 				if err != nil {
 					return nil, fmt.Errorf("charset detection error on content-type %s: %w", contentType, err)
 				}
-				res.Body = &http2.WarpReadCloser{RC: body, R: cr}
+				res.Body = &http2.WarpReadCloser{Reader: cr, Closer: body.Close}
 			}
 		}
 	}

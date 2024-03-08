@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/shiroyk/cloudcat"
+	"github.com/shiroyk/ski"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -116,16 +117,14 @@ func TestNewRequest(t *testing.T) {
 					b.Reset("fa")
 				}
 				req, err := NewRequest(r.method, ts.URL, r.body, r.header)
-				if err != nil {
-					t.Error(err)
+				if !assert.NoError(t, err) {
+					continue
 				}
 
 				res, err := DoString(fetch, req)
-				if err != nil {
-					t.Error(err)
-					continue
+				if assert.NoError(t, err) {
+					assert.Equal(t, r.want, res)
 				}
-				assert.Equal(t, r.want, res)
 			}
 		})
 	}
@@ -232,33 +231,38 @@ func TestNewTemplateRequest(t *testing.T) {
 	tplFuncs := templateFuncs()
 
 	ts := httptest.NewServer(h)
-	for _, tpl := range templateTestCase {
-		req, err := NewTemplateRequest(tplFuncs, tpl.template,
-			map[string]any{
-				"url":  ts.URL,
-				"page": 2,
-				"data": map[string]any{
-					"key": "foo",
-				},
-			})
-		if err != nil {
-			t.Error(err)
+	arg := map[string]any{
+		"url":  ts.URL,
+		"page": 2,
+		"data": map[string]any{
+			"key": "foo",
+		},
+	}
+
+	for _, c := range templateTestCase {
+		tpl, err := template.New("url").Funcs(tplFuncs).Parse(c.template)
+		if !assert.NoError(t, err) {
+			continue
+		}
+		req, err := NewTemplateRequest(tpl, arg)
+		if !assert.NoError(t, err) {
+			continue
 		}
 
 		res, err := DoString(f, req)
-		if err != nil {
-			t.Fatal(err)
+		if !assert.NoError(t, err) {
+			continue
 		}
-		assert.Equal(t, tpl.want, res)
+		assert.Equal(t, c.want, res)
 	}
 }
 
 func templateFuncs() template.FuncMap {
-	memCache := cloudcat.NewCache()
-	memCache.Set("json", []byte(`{"key":"foo"}`))
-	memCache.Set("form", []byte(`key=foo&value=bar`))
-	memCache.Set("image", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a})
-	return DefaultTemplateFuncMap(memCache)
+	cache := ski.NewCache()
+	_ = cache.Set(context.Background(), "json", []byte(`{"key":"foo"}`))
+	_ = cache.Set(context.Background(), "form", []byte(`key=foo&value=bar`))
+	_ = cache.Set(context.Background(), "image", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a})
+	return DefaultTemplateFuncMap(cache)
 }
 
 func newTestFetcher() *fetchImpl {

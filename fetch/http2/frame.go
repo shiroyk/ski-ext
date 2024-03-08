@@ -432,8 +432,8 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 		w:                 w,
 		r:                 r,
 		countError:        func(string) {},
-		logReads:          false,
-		logWrites:         false,
+		logReads:          logFrameReads,
+		logWrites:         logFrameWrites,
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
 	}
@@ -1510,13 +1510,12 @@ func (mh *MetaHeadersFrame) checkPseudos() error {
 }
 
 func (fr *Framer) maxHeaderStringLen() int {
-	v := fr.maxHeaderListSize()
-	if uint32(int(v)) == v {
-		return int(v)
+	v := int(fr.maxHeaderListSize())
+	if v < 0 {
+		// If maxHeaderListSize overflows an int, use no limit (0).
+		return 0
 	}
-	// They had a crazy big number for MaxHeaderBytes anyway,
-	// so give them unlimited header lengths:
-	return 0
+	return v
 }
 
 // readMetaFrame returns 0 or more CONTINUATION frames from fr and
@@ -1537,6 +1536,9 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	hdec.SetEmitEnabled(true)
 	hdec.SetMaxStringLength(fr.maxHeaderStringLen())
 	hdec.SetEmitFunc(func(hf hpack.HeaderField) {
+		if VerboseLogs && fr.logReads {
+			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
+		}
 		if !httpguts.ValidHeaderFieldValue(hf.Value) {
 			// Don't include the value in the error, because it may be sensitive.
 			invalid = headerFieldValueError(hf.Name)
@@ -1596,10 +1598,16 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	}
 	if invalid != nil {
 		fr.errDetail = invalid
+		if VerboseLogs {
+			log.Printf("http2: invalid header: %v", invalid)
+		}
 		return nil, StreamError{mh.StreamID, ErrCodeProtocol, invalid}
 	}
 	if err := mh.checkPseudos(); err != nil {
 		fr.errDetail = err
+		if VerboseLogs {
+			log.Printf("http2: invalid pseudo headers: %v", err)
+		}
 		return nil, StreamError{mh.StreamID, ErrCodeProtocol, err}
 	}
 	return mh, nil

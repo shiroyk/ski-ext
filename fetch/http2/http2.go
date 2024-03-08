@@ -1,19 +1,62 @@
-package http2
+// Copyright 2014 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package http2 implements the HTTP/2 protocol.
+//
+// This package is low-level and intended to be used directly by very
+// few people. Most users will use it indirectly through the automatic
+// use by the net/http package (from Go 1.6 and later).
+// For use in earlier Go versions see ConfigureServer. (Transport support
+// requires Go 1.6 or later)
+//
+// See https://http2.github.io/ for more information on HTTP/2.
+//
+// See https://http2.golang.org/ for a test server running this code.
+package http2 // import "golang.org/x/net/http2"
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	tls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http/httpguts"
 )
+
+var (
+	VerboseLogs    bool
+	logFrameWrites bool
+	logFrameReads  bool
+	inTests        bool
+)
+
+func init() {
+	e := os.Getenv("GODEBUG")
+	if strings.Contains(e, "http2debug=1") {
+		VerboseLogs = true
+	}
+	if strings.Contains(e, "http2debug=2") {
+		VerboseLogs = true
+		logFrameWrites = true
+		logFrameReads = true
+	}
+}
 
 const (
 	// ClientPreface is the string that must be sent by new
 	// connections from clients.
 	ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+	// SETTINGS_MAX_FRAME_SIZE default
+	// https://httpwg.org/specs/rfc7540.html#rfc.section.6.5.2
+	initialMaxFrameSize = 16384
 
 	// NextProtoTLS is the NPN/ALPN protocol negotiated during
 	// HTTP/2's TLS setup.
@@ -23,11 +66,47 @@ const (
 	initialHeaderTableSize = 4096
 
 	initialWindowSize = 65535 // 6.9.2 Initial Flow Control Window Size
+
+	defaultMaxReadFrameSize = 1 << 20
 )
 
 var (
 	clientPreface = []byte(ClientPreface)
 )
+
+type streamState int
+
+// HTTP/2 stream states.
+//
+// See http://tools.ietf.org/html/rfc7540#section-5.1.
+//
+// For simplicity, the server code merges "reserved (local)" into
+// "half-closed (remote)". This is one less state transition to track.
+// The only downside is that we send PUSH_PROMISEs slightly less
+// liberally than allowable. More discussion here:
+// https://lists.w3.org/Archives/Public/ietf-http-wg/2016JulSep/0599.html
+//
+// "reserved (remote)" is omitted since the client code does not
+// support server push.
+const (
+	stateIdle streamState = iota
+	stateOpen
+	stateHalfClosedLocal
+	stateHalfClosedRemote
+	stateClosed
+)
+
+var stateName = [...]string{
+	stateIdle:             "Idle",
+	stateOpen:             "Open",
+	stateHalfClosedLocal:  "HalfClosedLocal",
+	stateHalfClosedRemote: "HalfClosedRemote",
+	stateClosed:           "Closed",
+}
+
+func (st streamState) String() string {
+	return stateName[st]
+}
 
 // Setting is a setting parameter: which setting it is, and its value.
 type Setting struct {
@@ -116,71 +195,191 @@ func validWireHeaderFieldName(v string) bool {
 	return true
 }
 
-type keyValues struct {
-	key    string
-	values []string
-}
-
-// A headerSorter implements sort.Interface by sorting a []keyValues
-// by the given order, if not nil, or by Key otherwise.
-// It's used as a pointer, so it can fit in a sort.Interface
-// value without allocation.
-type headerSorter struct {
-	kvs   []keyValues
-	order map[string]int
-}
-
-func (s *headerSorter) Len() int      { return len(s.kvs) }
-func (s *headerSorter) Swap(i, j int) { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
-func (s *headerSorter) Less(i, j int) bool {
-	// If the order isn't defined, sort lexicographically.
-	if len(s.order) == 0 {
-		return s.kvs[i].key < s.kvs[j].key
+func httpCodeString(code int) string {
+	switch code {
+	case 200:
+		return "200"
+	case 404:
+		return "404"
 	}
-	si, iok := s.order[strings.ToLower(s.kvs[i].key)]
-	sj, jok := s.order[strings.ToLower(s.kvs[j].key)]
-	if !iok && !jok {
-		return s.kvs[i].key < s.kvs[j].key
-	} else if !iok && jok {
+	return strconv.Itoa(code)
+}
+
+// from pkg io
+type stringWriter interface {
+	WriteString(s string) (n int, err error)
+}
+
+// A gate lets two goroutines coordinate their activities.
+type gate chan struct{}
+
+func (g gate) Done() { g <- struct{}{} }
+func (g gate) Wait() { <-g }
+
+// A closeWaiter is like a sync.WaitGroup but only goes 1 to 0 (open to closed).
+type closeWaiter chan struct{}
+
+// Init makes a closeWaiter usable.
+// It exists because so a closeWaiter value can be placed inside a
+// larger struct and have the Mutex and Cond's memory in the same
+// allocation.
+func (cw *closeWaiter) Init() {
+	*cw = make(chan struct{})
+}
+
+// Close marks the closeWaiter as closed and unblocks any waiters.
+func (cw closeWaiter) Close() {
+	close(cw)
+}
+
+// Wait waits for the closeWaiter to become closed.
+func (cw closeWaiter) Wait() {
+	<-cw
+}
+
+// bufferedWriter is a buffered writer that writes to w.
+// Its buffered writer is lazily allocated as needed, to minimize
+// idle memory usage with many connections.
+type bufferedWriter struct {
+	_  incomparable
+	w  io.Writer     // immutable
+	bw *bufio.Writer // non-nil when data is buffered
+}
+
+func newBufferedWriter(w io.Writer) *bufferedWriter {
+	return &bufferedWriter{w: w}
+}
+
+// bufWriterPoolBufferSize is the size of bufio.Writer's
+// buffers created using bufWriterPool.
+//
+// TODO: pick a less arbitrary value? this is a bit under
+// (3 x typical 1500 byte MTU) at least. Other than that,
+// not much thought went into it.
+const bufWriterPoolBufferSize = 4 << 10
+
+var bufWriterPool = sync.Pool{
+	New: func() interface{} {
+		return bufio.NewWriterSize(nil, bufWriterPoolBufferSize)
+	},
+}
+
+func (w *bufferedWriter) Available() int {
+	if w.bw == nil {
+		return bufWriterPoolBufferSize
+	}
+	return w.bw.Available()
+}
+
+func (w *bufferedWriter) Write(p []byte) (n int, err error) {
+	if w.bw == nil {
+		bw := bufWriterPool.Get().(*bufio.Writer)
+		bw.Reset(w.w)
+		w.bw = bw
+	}
+	return w.bw.Write(p)
+}
+
+func (w *bufferedWriter) Flush() error {
+	bw := w.bw
+	if bw == nil {
+		return nil
+	}
+	err := bw.Flush()
+	bw.Reset(nil)
+	bufWriterPool.Put(bw)
+	w.bw = nil
+	return err
+}
+
+func mustUint31(v int32) uint32 {
+	if v < 0 || v > 2147483647 {
+		panic("out of range")
+	}
+	return uint32(v)
+}
+
+// bodyAllowedForStatus reports whether a given response status code
+// permits a body. See RFC 7230, section 3.3.
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
 		return false
-	} else if iok && !jok {
-		return true
+	case status == 204:
+		return false
+	case status == 304:
+		return false
 	}
-	return si < sj
+	return true
 }
 
-var headerSorterPool = sync.Pool{
-	New: func() interface{} { return new(headerSorter) },
+type httpError struct {
+	_       incomparable
+	msg     string
+	timeout bool
 }
 
-func sortedKeyValues(header http.Header) (kvs []keyValues) {
-	sorter := headerSorterPool.Get().(*headerSorter)
-	if cap(sorter.kvs) < len(header) {
-		sorter.kvs = make([]keyValues, 0, len(header))
-	}
-	kvs = sorter.kvs[:0]
-	for k, vv := range header {
-		kvs = append(kvs, keyValues{k, vv})
-	}
-	sorter.kvs = kvs
-	sort.Sort(sorter)
-	return kvs
+func (e *httpError) Error() string   { return e.msg }
+func (e *httpError) Timeout() bool   { return e.timeout }
+func (e *httpError) Temporary() bool { return true }
+
+var errTimeout error = &httpError{msg: "http2: timeout awaiting response headers", timeout: true}
+
+type connectionStater interface {
+	ConnectionState() tls.ConnectionState
 }
 
-func sortedKeyValuesBy(header http.Header, headerOrder []string) (kvs []keyValues) {
-	sorter := headerSorterPool.Get().(*headerSorter)
-	if cap(sorter.kvs) < len(header) {
-		sorter.kvs = make([]keyValues, 0, len(header))
-	}
-	kvs = sorter.kvs[:0]
-	for k, vv := range header {
-		kvs = append(kvs, keyValues{k, vv})
-	}
-	sorter.kvs = kvs
-	sorter.order = make(map[string]int)
-	for i, v := range headerOrder {
-		sorter.order[v] = i
-	}
-	sort.Sort(sorter)
-	return kvs
+var sorterPool = sync.Pool{New: func() interface{} { return new(sorter) }}
+
+type sorter struct {
+	v []string // owned by sorter
 }
+
+func (s *sorter) Len() int           { return len(s.v) }
+func (s *sorter) Swap(i, j int)      { s.v[i], s.v[j] = s.v[j], s.v[i] }
+func (s *sorter) Less(i, j int) bool { return s.v[i] < s.v[j] }
+
+// Keys returns the sorted keys of h.
+//
+// The returned slice is only valid until s used again or returned to
+// its pool.
+func (s *sorter) Keys(h http.Header) []string {
+	keys := s.v[:0]
+	for k := range h {
+		keys = append(keys, k)
+	}
+	s.v = keys
+	sort.Sort(s)
+	return keys
+}
+
+func (s *sorter) SortStrings(ss []string) {
+	// Our sorter works on s.v, which sorter owns, so
+	// stash it away while we sort the user's buffer.
+	save := s.v
+	s.v = ss
+	sort.Sort(s)
+	s.v = save
+}
+
+// validPseudoPath reports whether v is a valid :path pseudo-header
+// value. It must be either:
+//
+//   - a non-empty string starting with '/'
+//   - the string '*', for OPTIONS requests.
+//
+// For now this is only used a quick check for deciding when to clean
+// up Opaque URLs before sending requests from the Transport.
+// See golang.org/issue/16847
+//
+// We used to enforce that the path also didn't start with "//", but
+// Google's GFE accepts such paths and Chrome sends them, so ignore
+// that part of the spec. See golang.org/issue/19103.
+func validPseudoPath(v string) bool {
+	return (len(v) > 0 && v[0] == '/') || v == "*"
+}
+
+// incomparable is a zero-width, non-comparable type. Adding it to a struct
+// makes that struct also non-comparable, and generally doesn't add
+// any size (as long as it's first).
+type incomparable [0]func()
