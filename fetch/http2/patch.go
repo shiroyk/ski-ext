@@ -25,6 +25,10 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
+const (
+	defaultMaxStreams = 250 // TODO: make this 100 as the GFE seems to?
+)
+
 type WarpReadCloser struct {
 	Reader io.Reader
 	Closer func() error
@@ -189,6 +193,12 @@ type Transport struct {
 	// waiting for their turn.
 	StrictMaxConcurrentStreams bool
 
+	// IdleConnTimeout is the maximum amount of time an idle
+	// (keep-alive) connection will remain idle before closing
+	// itself.
+	// Zero means no limit.
+	IdleConnTimeout time.Duration
+
 	// ReadIdleTimeout is the timeout after which a health check using ping
 	// frame will be carried out if no frame is received on the connection.
 	// Note that a ping response will is considered a received frame, so if
@@ -221,6 +231,8 @@ type Transport struct {
 
 	connPoolOnce  sync.Once
 	connPoolOrDef ClientConnPool // non-nil version of ConnPool
+
+	*transportTestHooks
 }
 
 // ConfigureTransports configures a net/http HTTP/1 Transport to use HTTP/2.
@@ -354,25 +366,38 @@ func (t *Transport) dialTLSWithContext(ctx context.Context, network, addr string
 }
 
 func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, error) {
+	conf := configFromTransport(t)
 	cc := &ClientConn{
-		t:                      t,
-		tconn:                  c,
-		readerDone:             make(chan struct{}),
-		nextStreamID:           1,
-		maxFrameSize:           16 << 10,                    // spec default
-		initialWindowSize:      65535,                       // spec default
-		maxConcurrentStreams:   initialMaxConcurrentStreams, // "infinite", per spec. Use a smaller value until we have received server settings.
-		peerMaxHeaderTableSize: initialHeaderTableSize,
-		peerMaxHeaderListSize:  0xffffffffffffffff, // "infinite", per spec. Use 2^64-1 instead.
-		streams:                make(map[uint32]*clientStream),
-		singleUse:              singleUse,
-		wantSettingsAck:        true,
-		pings:                  make(map[[8]byte]chan struct{}),
-		reqHeaderMu:            make(chan struct{}, 1),
+		t:                           t,
+		tconn:                       c,
+		readerDone:                  make(chan struct{}),
+		nextStreamID:                1,
+		maxFrameSize:                16 << 10, // spec default
+		initialWindowSize:           65535,    // spec default
+		initialStreamRecvWindowSize: conf.MaxUploadBufferPerStream,
+		maxConcurrentStreams:        initialMaxConcurrentStreams, // "infinite", per spec. Use a smaller value until we have received server settings.
+		peerMaxHeaderListSize:       0xffffffffffffffff,          // "infinite", per spec. Use 2^64-1 instead.
+		streams:                     make(map[uint32]*clientStream),
+		singleUse:                   singleUse,
+		wantSettingsAck:             true,
+		readIdleTimeout:             conf.SendPingTimeout,
+		pingTimeout:                 conf.PingTimeout,
+		pings:                       make(map[[8]byte]chan struct{}),
+		reqHeaderMu:                 make(chan struct{}, 1),
 	}
+
+	// Start the idle timer after the connection is fully initialized.
 	if d := t.idleConnTimeout(); d != 0 {
 		cc.idleTimeout = d
-		cc.idleTimer = time.AfterFunc(d, cc.onIdleTimeout)
+		cc.idleTimer = t.afterFunc(d, cc.onIdleTimeout)
+	}
+
+	var group synctestGroupInterface
+	if t.transportTestHooks != nil {
+		t.markNewGoroutine()
+		t.transportTestHooks.newclientconn(cc)
+		c = cc.tconn
+		group = t.group
 	}
 
 	cc.cond = sync.NewCond(&cc.mu)
@@ -381,12 +406,14 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 	// TODO: adjust this writer size to account for frame size +
 	// MTU + crypto/tls record padding.
 	cc.bw = bufio.NewWriter(stickyErrWriter{
+		group:   group,
 		conn:    c,
-		timeout: t.WriteByteTimeout,
+		timeout: conf.WriteByteTimeout,
 		err:     &cc.werr,
 	})
 	cc.br = bufio.NewReader(c)
 	cc.fr = NewFramer(cc.bw, cc.br)
+	cc.fr.SetMaxReadFrameSize(conf.MaxReadFrameSize)
 	if t.CountError != nil {
 		cc.fr.countError = t.CountError
 	}
@@ -394,6 +421,10 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 	if t.AllowHTTP {
 		cc.nextStreamID = 3
 	}
+
+	cc.henc = hpack.NewEncoder(&cc.hbuf)
+	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
+	cc.peerMaxHeaderTableSize = initialHeaderTableSize
 
 	if cs, ok := c.(connectionStater); ok {
 		state := cs.ConnectionState()
@@ -404,16 +435,14 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 		}
 	}
 
-	maxHeaderTableSize := t.maxDecoderHeaderTableSize()
+	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
 	var settings []Setting
 	if len(t.opt.Settings) == 0 {
 		settings = []Setting{
 			{ID: SettingEnablePush, Val: 0},
-			{ID: SettingInitialWindowSize, Val: transportDefaultStreamFlow},
+			{ID: SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
 		}
-		if max := t.maxFrameReadSize(); max != 0 {
-			settings = append(settings, Setting{ID: SettingMaxFrameSize, Val: max})
-		}
+		settings = append(settings, Setting{ID: SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
 		if max := t.maxHeaderListSize(); max != 0 {
 			settings = append(settings, Setting{ID: SettingMaxHeaderListSize, Val: max})
 		}
@@ -449,12 +478,6 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 		}
 	}
 
-	cc.henc = hpack.NewEncoder(&cc.hbuf)
-	cc.henc.SetMaxDynamicTableSizeLimit(t.maxEncoderHeaderTableSize())
-
-	if size := t.maxFrameReadSize(); size != 0 {
-		cc.fr.SetMaxReadFrameSize(t.maxFrameReadSize())
-	}
 	cc.fr.ReadMetaHeaders = hpack.NewDecoder(maxHeaderTableSize, nil)
 	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
 
@@ -514,19 +537,14 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 		}
 	}
 
-	// Check for any invalid headers and return an error before we
+	// Check for any invalid headers+trailers and return an error before we
 	// potentially pollute our hpack state. (We want to be able to
 	// continue to reuse the hpack encoder for future requests)
-	for k, vv := range req.Header {
-		if !httpguts.ValidHeaderFieldName(k) {
-			return nil, fmt.Errorf("invalid HTTP header name %q", k)
-		}
-		for _, v := range vv {
-			if !httpguts.ValidHeaderFieldValue(v) {
-				// Don't include the value in the error, because it may be sensitive.
-				return nil, fmt.Errorf("invalid HTTP header value for header %q", k)
-			}
-		}
+	if err := validateHeaders(req.Header); err != "" {
+		return nil, fmt.Errorf("invalid HTTP header %s", err)
+	}
+	if err := validateHeaders(req.Trailer); err != "" {
+		return nil, fmt.Errorf("invalid HTTP trailer %s", err)
 	}
 
 	// PATCH START
@@ -695,7 +713,7 @@ func (cc *ClientConn) RoundTrip(req *http.Request) (*http.Response, error) {
 		respHeaderRecv:       make(chan struct{}),
 		donec:                make(chan struct{}),
 	}
-	go cs.doRequest(req)
+	go cs.doRequest(req, nil)
 
 	waitDone := func() error {
 		select {
