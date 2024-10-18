@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"sync/atomic"
-
-	"github.com/shiroyk/ski"
 )
 
 type roundRobinProxy struct {
@@ -57,5 +55,5 @@ func ProxyFromRequest(req *http.Request) (*url.URL, error) {
 	if proxy := req.Context().Value(&requestProxyKey); proxy != nil {
 		return proxy.(*roundRobinProxy).getProxy()
 	}
-	return ski.ProxyFromRequest(req)
+	return nil, nil
 }
