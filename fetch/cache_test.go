@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"io"
@@ -9,10 +10,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/shiroyk/ski"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,7 +34,7 @@ func (c *fakeClock) since(_ time.Time) time.Duration {
 
 // NewMemoryCacheTransport returns a new CacheTransport using the in-memory cache implementation
 func NewMemoryCacheTransport() *CacheTransport {
-	return NewCacheTransport(ski.NewCache())
+	return NewCacheTransport(NewCache())
 }
 
 func TestMain(m *testing.M) {
@@ -176,7 +177,7 @@ func teardown() {
 }
 
 func resetTest() {
-	s.transport.Cache = ski.NewCache()
+	s.transport.Cache = NewCache()
 	clock = &realClock{}
 }
 
@@ -1495,5 +1496,55 @@ func TestClientTimeout(t *testing.T) {
 	}
 	if taken := time.Since(started); taken >= 2*time.Second {
 		t.Error("client.Do took 2+ seconds, want < 2 seconds")
+	}
+}
+
+// memoryCache is an implementation of Cache that stores bytes in in-memory.
+type memoryCache struct {
+	sync.Mutex
+	items   map[string][]byte
+	timeout map[string]int64
+}
+
+// Get returns the []byte and true, if not existing returns false.
+func (c *memoryCache) Get(_ context.Context, key string) ([]byte, error) {
+	c.Lock()
+	defer c.Unlock()
+	if ddl, exist := c.timeout[key]; exist {
+		if time.Now().Unix() > ddl {
+			delete(c.items, key)
+			delete(c.timeout, key)
+			return []byte{}, nil
+		}
+	}
+	if b, ok := c.items[key]; ok {
+		return b, nil
+	}
+	return nil, nil
+}
+
+// Set saves []byte to the cache with key
+func (c *memoryCache) Set(_ context.Context, key string, value []byte, timeout time.Duration) error {
+	c.Lock()
+	defer c.Unlock()
+	c.items[key] = value
+	c.timeout[key] = time.Now().Add(timeout).Unix()
+	return nil
+}
+
+// Del removes key from the cache
+func (c *memoryCache) Del(_ context.Context, key string) error {
+	c.Lock()
+	defer c.Unlock()
+	delete(c.items, key)
+	delete(c.timeout, key)
+	return nil
+}
+
+// NewCache returns a new Cache that will store items in in-memory.
+func NewCache() Cache {
+	return &memoryCache{
+		items:   make(map[string][]byte),
+		timeout: make(map[string]int64),
 	}
 }

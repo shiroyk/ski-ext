@@ -3,15 +3,21 @@ package fetch
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"strings"
 	"time"
-
-	"github.com/shiroyk/ski"
 )
+
+// A Cache interface is used to store bytes.
+type Cache interface {
+	Get(ctx context.Context, key string) ([]byte, error)
+	Set(ctx context.Context, key string, value []byte, timeout time.Duration) error
+	Del(ctx context.Context, key string) error
+}
 
 // (This implementation code copyright geziyor authors: https://github.com/geziyor/geziyor)
 
@@ -51,7 +57,7 @@ type CacheTransport struct {
 	// The RoundTripper interface actually used to make requests
 	// If nil, http.DefaultTransport is used
 	Transport http.RoundTripper
-	Cache     ski.Cache
+	Cache     Cache
 	// If true, responses returned from the cache will be given an extra header, X-From-Cache
 	MarkCachedResponses bool
 }
@@ -66,7 +72,7 @@ func cacheKey(req *http.Request) string {
 
 // cachedResponse returns the cached http.Response for req if present, and nil
 // otherwise.
-func cachedResponse(c ski.Cache, req *http.Request) (resp *http.Response, err error) {
+func cachedResponse(c Cache, req *http.Request) (resp *http.Response, err error) {
 	cachedVal, err := c.Get(req.Context(), cacheKey(req))
 	if err != nil {
 		return nil, err
@@ -78,7 +84,7 @@ func cachedResponse(c ski.Cache, req *http.Request) (resp *http.Response, err er
 
 // NewCacheTransport returns new CacheTransport with the
 // provided Cache implementation and MarkCachedResponses set to true
-func NewCacheTransport(c ski.Cache) *CacheTransport {
+func NewCacheTransport(c Cache) *CacheTransport {
 	return &CacheTransport{
 		Policy:              RFC2616,
 		Cache:               c,
@@ -141,7 +147,7 @@ func (t *CacheTransport) RoundTripDummy(req *http.Request) (resp *http.Response,
 	if cacheable {
 		respBytes, err := httputil.DumpResponse(resp, true)
 		if err == nil {
-			_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
+			_ = t.Cache.Set(req.Context(), cacheKey, respBytes, 0)
 		}
 	} else {
 		_ = t.Cache.Del(req.Context(), cacheKey)
@@ -266,14 +272,14 @@ func (t *CacheTransport) RoundTripRFC2616(req *http.Request) (resp *http.Respons
 					resp.Body = io.NopCloser(r)
 					respBytes, err := httputil.DumpResponse(&resp, true)
 					if err == nil {
-						_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
+						_ = t.Cache.Set(req.Context(), cacheKey, respBytes, 0)
 					}
 				},
 			}
 		default:
 			respBytes, err := httputil.DumpResponse(resp, true)
 			if err == nil {
-				_ = t.Cache.Set(req.Context(), cacheKey, respBytes)
+				_ = t.Cache.Set(req.Context(), cacheKey, respBytes, 0)
 			}
 		}
 	} else {

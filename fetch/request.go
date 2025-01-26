@@ -3,7 +3,6 @@ package fetch
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"sync"
 	"text/template"
 
-	"github.com/shiroyk/ski"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -153,16 +151,6 @@ func ReadRequest(request string) (req *http.Request, err error) {
 	}
 
 	return req, nil
-}
-
-// DefaultTemplateFuncMap The default template function map
-func DefaultTemplateFuncMap(cache ski.Cache) template.FuncMap {
-	return template.FuncMap{
-		"get": func(key string) string {
-			v, _ := cache.Get(context.Background(), key)
-			return string(v)
-		},
-	}
 }
 
 // parseRequestLine parses "GET /foo HTTP/1.1" into its three parts.

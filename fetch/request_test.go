@@ -13,8 +13,8 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/shiroyk/ski"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewRequest(t *testing.T) {
@@ -27,37 +27,25 @@ func TestNewRequest(t *testing.T) {
 			}
 		case http.MethodGet:
 			_, err := fmt.Fprint(w, "114514")
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 			return
 		}
 
 		if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
 			file, _, err := r.FormFile("file")
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 
 			body, err := io.ReadAll(file)
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 
 			_, err = fmt.Fprint(w, string(body))
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 		} else {
 			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 
 			_, err = fmt.Fprint(w, string(body))
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 		}
 	})
 
@@ -117,14 +105,11 @@ func TestNewRequest(t *testing.T) {
 					b.Reset("fa")
 				}
 				req, err := NewRequest(r.method, ts.URL, r.body, r.header)
-				if !assert.NoError(t, err) {
-					continue
-				}
+				require.NoError(t, err)
 
-				res, err := DoString(fetch, req)
-				if assert.NoError(t, err) {
-					assert.Equal(t, r.want, res)
-				}
+				res, err := doString(fetch, req)
+				require.NoError(t, err)
+				assert.Equal(t, r.want, res)
 			}
 		})
 	}
@@ -137,9 +122,7 @@ func createMultiPart(t *testing.T, data map[string]any) ([]byte, map[string]stri
 		if f, ok := v.([]byte); ok {
 			// Creates a new form-data header with the provided field name and file name.
 			fw, err := mpw.CreateFormFile(k, "blob")
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			// Write bytes to the part
 			if _, err := fw.Write(f); err != nil {
 				t.Fatal(err)
@@ -216,9 +199,7 @@ func TestNewTemplateRequest(t *testing.T) {
 			body = []byte(fmt.Sprintf("%s-%s-%s", r.FormValue("key"), fh.Filename, http.DetectContentType(data)))
 		default:
 			if r.Method == http.MethodGet {
-				if err := r.ParseForm(); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, r.ParseForm())
 				body = []byte(r.Form.Encode())
 			} else {
 				body, _ = io.ReadAll(r.Body)
@@ -241,35 +222,34 @@ func TestNewTemplateRequest(t *testing.T) {
 
 	for _, c := range templateTestCase {
 		tpl, err := template.New("url").Funcs(tplFuncs).Parse(c.template)
-		if !assert.NoError(t, err) {
-			continue
-		}
-		req, err := NewTemplateRequest(tpl, arg)
-		if !assert.NoError(t, err) {
-			continue
-		}
+		require.NoError(t, err)
 
-		res, err := DoString(f, req)
-		if !assert.NoError(t, err) {
-			continue
-		}
+		req, err := NewTemplateRequest(tpl, arg)
+		require.NoError(t, err)
+
+		res, err := doString(f, req)
+		require.NoError(t, err)
 		assert.Equal(t, c.want, res)
 	}
 }
 
 func templateFuncs() template.FuncMap {
-	cache := ski.NewCache()
-	_ = cache.Set(context.Background(), "json", []byte(`{"key":"foo"}`))
-	_ = cache.Set(context.Background(), "form", []byte(`key=foo&value=bar`))
-	_ = cache.Set(context.Background(), "image", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a})
-	return DefaultTemplateFuncMap(cache)
+	cache := NewCache()
+	_ = cache.Set(context.Background(), "json", []byte(`{"key":"foo"}`), 0)
+	_ = cache.Set(context.Background(), "form", []byte(`key=foo&value=bar`), 0)
+	_ = cache.Set(context.Background(), "image", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, 0)
+	return template.FuncMap{
+		"get": func(key string) string {
+			v, _ := cache.Get(context.Background(), key)
+			return string(v)
+		},
+	}
 }
 
-func newTestFetcher() *fetchImpl {
+func newTestFetcher() *Fetch {
 	return NewFetch(Options{
 		MaxBodySize:    DefaultMaxBodySize,
-		RetryTimes:     DefaultRetryTimes,
 		RetryHTTPCodes: DefaultRetryHTTPCodes,
 		Timeout:        DefaultTimeout,
-	}).(*fetchImpl)
+	})
 }

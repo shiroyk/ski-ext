@@ -2,24 +2,22 @@ package http2
 
 import (
 	"bufio"
-	"compress/gzip"
-	"compress/zlib"
 	"context"
 	cryptotls "crypto/tls"
+	"errors"
 	"fmt"
-	"io"
-	mathrand "math/rand"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/textproto"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
-	"github.com/andybalholm/brotli"
 	tls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2/hpack"
@@ -29,48 +27,42 @@ const (
 	defaultMaxStreams = 250 // TODO: make this 100 as the GFE seems to?
 )
 
-type WarpReadCloser struct {
-	Reader io.Reader
-	Closer func() error
+var hackField = map[string]uintptr{}
+var done = atomic.Bool{}
+
+func init() {
+	done.Store(true)
+	t := reflect.TypeOf(new(cryptotls.Conn)).Elem()
+	for _, name := range []string{"conn", "config", "clientProtocol", "isHandshakeComplete"} {
+		field, ok := t.FieldByName(name)
+		if ok {
+			hackField[name] = field.Offset
+		}
+	}
 }
 
-func (r *WarpReadCloser) Read(p []byte) (n int, err error) { return r.Reader.Read(p) }
-func (r *WarpReadCloser) Close() error                     { return r.Closer() }
-
-var encodings = []string{"gzip", "deflate", "br"}
-
-// DecodeResponse decode Content-Encoding from HTTP header (gzip, deflate, br) encodings.
-func DecodeResponse(res *http.Response) (*http.Response, error) {
-	// In the order decompressed
-	encoding := res.Header.Get("Content-Encoding")
-	if encoding == "" {
-		return res, nil
+// hackTlsConn make a hack, set private field
+func hackTlsConn(uConn *tls.UConn) net.Conn {
+	state := uConn.ConnectionState()
+	if state.NegotiatedProtocol != NextProtoTLS {
+		return uConn
 	}
-	var (
-		body = res.Body
-		err  error
-	)
-	for _, encode := range strings.Split(encoding, ",") {
-		switch strings.TrimSpace(encode) {
-		case "deflate":
-			body, err = zlib.NewReader(body)
-		case "gzip":
-			body, err = gzip.NewReader(body)
-		case "br":
-			body = &WarpReadCloser{brotli.NewReader(body), body.Close}
-		default:
-			err = fmt.Errorf("unsupported compression type %s", encode)
+	ret := new(cryptotls.Conn)
+
+	for field, offset := range hackField {
+		ptr := unsafe.Pointer(uintptr(unsafe.Pointer(ret)) + offset)
+		switch field {
+		case "conn":
+			*(*net.Conn)(ptr) = uConn
+		case "config":
+			*(**cryptotls.Config)(ptr) = &cryptotls.Config{}
+		case "clientProtocol":
+			*(*string)(ptr) = state.NegotiatedProtocol
+		case "isHandshakeComplete":
+			*(*atomic.Bool)(ptr) = done
 		}
-		if err != nil {
-			return nil, err
-		}
-		res.Body = body
-		res.Header.Del("Content-Encoding")
-		res.Header.Del("Content-Length")
-		res.ContentLength = -1
-		res.Uncompressed = true
 	}
-	return res, nil
+	return ret
 }
 
 type Options struct {
@@ -111,6 +103,10 @@ type Options struct {
 	GetTlsClientHelloSpec func() *tls.ClientHelloSpec
 }
 
+// Transport is an HTTP/2 Transport.
+//
+// A Transport internally caches connections to servers. It is safe
+// for concurrent use by multiple goroutines.
 type Transport struct {
 	// DialTLSContext specifies an optional dial function with context for
 	// creating TLS connections for requests.
@@ -140,11 +136,12 @@ type Transport struct {
 	ConnPool ClientConnPool
 
 	// DisableCompression, if true, prevents the Transport from
-	// requesting compression with an "Accept-Encoding: gzip, deflate, br"
+	// requesting compression with an "Accept-Encoding: gzip"
 	// request header when the Request contains no existing
-	// Accept-Encoding value. If the Transport requests compression
-	// it's transparently decoded in the Response.Body. However, if the user
-	// explicitly requested compression it is not automatically
+	// Accept-Encoding value. If the Transport requests gzip on
+	// its own and gets a gzipped response, it's transparently
+	// decoded in the Response.Body. However, if the user
+	// explicitly requested gzip it is not automatically
 	// uncompressed.
 	DisableCompression bool
 
@@ -226,110 +223,101 @@ type Transport struct {
 	// t1, if non-nil, is the standard library Transport using
 	// this transport. Its settings are used (but not its
 	// RoundTrip method, etc).
-	t1  *http.Transport
-	opt Options
+	t1 *http.Transport
 
 	connPoolOnce  sync.Once
 	connPoolOrDef ClientConnPool // non-nil version of ConnPool
 
 	*transportTestHooks
+
+	opt Options
+}
+
+// ConfigureTransport configures a net/http HTTP/1 Transport to use HTTP/2.
+// It returns an error if t1 has already been HTTP/2-enabled.
+//
+// Use ConfigureTransports instead to configure the HTTP/2 Transport.
+func ConfigureTransport(t1 *http.Transport, opt ...Options) error {
+	_, err := ConfigureTransports(t1, opt...)
+	return err
 }
 
 // ConfigureTransports configures a net/http HTTP/1 Transport to use HTTP/2.
-// It returns a new HTTP/2 Transport.
-func ConfigureTransports(t1 *http.Transport, opts ...Options) *Transport {
+// It returns a new HTTP/2 Transport for further configuration.
+// It returns an error if t1 has already been HTTP/2-enabled.
+func ConfigureTransports(t1 *http.Transport, opt ...Options) (*Transport, error) {
+	return configureTransports(t1, opt...)
+}
+
+func configureTransports(t1 *http.Transport, opt ...Options) (*Transport, error) {
 	connPool := new(clientConnPool)
 	t2 := &Transport{
-		ConnPool: noDialClientConnPool{connPool},
-		t1:       t1,
+		AllowHTTP: true,
+		ConnPool:  noDialClientConnPool{connPool},
+		t1:        t1,
 	}
-	if len(opts) > 0 {
-		t2.opt = opts[0]
+	if len(opt) > 0 {
+		t2.opt = opt[0]
 	}
 	connPool.t = t2
-	return t2
-}
-
-func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Header.Get("Accept-Encoding") == "" &&
-		req.Header.Get("Range") == "" &&
-		req.Method != "HEAD" &&
-		!t.disableCompression() {
-		req.Header["Accept-Encoding"] = encodings
-	}
-	res, err := t.roundTrip(req)
-	if err != nil {
-		return nil, err
-	}
-	if !t.disableCompression() {
-		return DecodeResponse(res)
-	}
-	return res, nil
-}
-
-func (cc *ClientConn) downgrade(req *http.Request) (*http.Response, error) {
-	defer cc.decrStreamReservations()
-	if cc.idleTimer != nil {
-		cc.idleTimer.Reset(cc.idleTimeout)
-	}
-	if err := req.Write(cc.tconn); err != nil {
-		return nil, err
-	}
-	return http.ReadResponse(cc.br, req)
-}
-
-func (t *Transport) roundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme != "https" {
-		if t.t1 == nil {
-			return http.DefaultTransport.RoundTrip(req)
-		}
-		return t.t1.RoundTrip(req)
-	}
-
-	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
-	for retry := 0; ; retry++ {
-		cc, err := t.connPool().GetClientConn(req, addr)
+	t1.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
-		if cc.tlsState != nil && cc.tlsState.NegotiatedProtocol != NextProtoTLS {
-			return cc.downgrade(req)
-		}
-		res, err := cc.RoundTrip(req)
-		if err != nil && retry <= 6 {
-			if req, err = shouldRetryRequest(req, err); err == nil {
-				// After the first retry, do exponential backoff with 10% jitter.
-				if retry == 0 {
-					continue
-				}
-				backoff := float64(uint(1) << (uint(retry) - 1))
-				backoff += backoff * (0.1 * mathrand.Float64())
-				d := time.Second * time.Duration(backoff)
-				timer := time.NewTimer(d)
-				select {
-				case <-timer.C:
-					continue
-				case <-req.Context().Done():
-					timer.Stop()
-					err = req.Context().Err()
-				}
-			}
-		}
+		conn, err := t2.dialTLSWithContext(ctx, network, addr, t2.newTLSConfig(host))
 		if err != nil {
 			return nil, err
 		}
-		return res, nil
+		// set the utls.Conn to cryptotls.NetConn
+		return hackTlsConn(conn), nil
 	}
-}
-
-func (t *Transport) dialTLS(ctx context.Context, network, addr string, tlsCfg *tls.Config) (net.Conn, error) {
-	if t.DialTLSContext != nil {
-		return t.DialTLSContext(ctx, network, addr, tlsCfg)
-	} else if t.DialTLS != nil {
-		return t.DialTLS(network, addr, tlsCfg)
+	if err := registerHTTPSProtocol(t1, noDialH2RoundTripper{t2}); err != nil {
+		return nil, err
 	}
-
-	return t.dialTLSWithContext(ctx, network, addr, tlsCfg)
+	if t1.TLSClientConfig == nil {
+		t1.TLSClientConfig = new(cryptotls.Config)
+	}
+	if !strSliceContains(t1.TLSClientConfig.NextProtos, "h2") {
+		t1.TLSClientConfig.NextProtos = append([]string{"h2"}, t1.TLSClientConfig.NextProtos...)
+	}
+	if !strSliceContains(t1.TLSClientConfig.NextProtos, "http/1.1") {
+		t1.TLSClientConfig.NextProtos = append(t1.TLSClientConfig.NextProtos, "http/1.1")
+	}
+	upgradeFn := func(scheme, authority string, c net.Conn) http.RoundTripper {
+		addr := authorityAddr(scheme, authority)
+		if used, err := connPool.addConnIfNeeded(addr, t2, c); err != nil {
+			go c.Close()
+			return erringRoundTripper{err}
+		} else if !used {
+			// Turns out we don't need this c.
+			// For example, two goroutines made requests to the same host
+			// at the same time, both kicking off TCP dials. (since protocol
+			// was unknown)
+			go c.Close()
+		}
+		if scheme == "http" {
+			return (*unencryptedTransport)(t2)
+		}
+		return t2
+	}
+	if t1.TLSNextProto == nil {
+		t1.TLSNextProto = make(map[string]func(string, *cryptotls.Conn) http.RoundTripper)
+	}
+	t1.TLSNextProto[NextProtoTLS] = func(authority string, c *cryptotls.Conn) http.RoundTripper {
+		// get the utls.Conn
+		return upgradeFn("https", authority, c.NetConn())
+	}
+	// The "unencrypted_http2" TLSNextProto key is used to pass off non-TLS HTTP/2 conns.
+	t1.TLSNextProto[nextProtoUnencryptedHTTP2] = func(authority string, c *cryptotls.Conn) http.RoundTripper {
+		nc, err := unencryptedNetConnFromTLSConn(c.NetConn())
+		if err != nil {
+			go c.Close()
+			return erringRoundTripper{err}
+		}
+		return upgradeFn("http", authority, nc)
+	}
+	return t2, nil
 }
 
 var zeroDialer net.Dialer
@@ -379,11 +367,13 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 		peerMaxHeaderListSize:       0xffffffffffffffff,          // "infinite", per spec. Use 2^64-1 instead.
 		streams:                     make(map[uint32]*clientStream),
 		singleUse:                   singleUse,
+		seenSettingsChan:            make(chan struct{}),
 		wantSettingsAck:             true,
 		readIdleTimeout:             conf.SendPingTimeout,
 		pingTimeout:                 conf.PingTimeout,
 		pings:                       make(map[[8]byte]chan struct{}),
 		reqHeaderMu:                 make(chan struct{}, 1),
+		lastActive:                  t.now(),
 	}
 
 	// Start the idle timer after the connection is fully initialized.
@@ -428,7 +418,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 
 	if cs, ok := c.(connectionStater); ok {
 		state := cs.ConnectionState()
-		cc.tlsState = &state
+		//cc.tlsState = state
 		// if not HTTP/2
 		if state.NegotiatedProtocol != NextProtoTLS {
 			return cc, nil
@@ -501,12 +491,18 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, erro
 		return nil, cc.werr
 	}
 
+	// Start the idle timer after the connection is fully initialized.
+	if d := t.idleConnTimeout(); d != 0 {
+		cc.idleTimeout = d
+		cc.idleTimer = t.afterFunc(d, cc.onIdleTimeout)
+	}
+
 	go cc.readLoop()
 	return cc, nil
 }
 
 // requires cc.wmu be held.
-func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, contentLength int64) ([]byte, error) {
+func (cc *ClientConn) encodeHeaders(req *http.Request, addGzipHeader bool, trailers string, contentLength int64) ([]byte, error) {
 	cc.hbuf.Reset()
 	if req.URL == nil {
 		return nil, errNilRequestURL
@@ -520,9 +516,12 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 	if err != nil {
 		return nil, err
 	}
+	if !httpguts.ValidHostHeader(host) {
+		return nil, errors.New("http2: invalid Host header")
+	}
 
 	var path string
-	if req.Method != "CONNECT" {
+	if !isNormalConnect(req) {
 		path = req.URL.RequestURI()
 		if !validPseudoPath(path) {
 			orig := path
@@ -573,8 +572,6 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 					if req.Method != "CONNECT" {
 						f(":scheme", req.URL.Scheme)
 					}
-				default:
-					continue
 				}
 			}
 		} else {
@@ -584,7 +581,7 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 				m = http.MethodGet
 			}
 			f(":method", m)
-			if req.Method != "CONNECT" {
+			if !isNormalConnect(req) {
 				f(":path", path)
 				f(":scheme", req.URL.Scheme)
 			}
@@ -665,6 +662,9 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 		if shouldSendReqContentLength(req.Method, contentLength) {
 			f("content-length", strconv.FormatInt(contentLength, 10))
 		}
+		if addGzipHeader {
+			f("accept-encoding", "gzip")
+		}
 		if !didUA {
 			f("user-agent", defaultUserAgent)
 		}
@@ -696,128 +696,6 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, _ bool, trailers string, 
 	})
 
 	return cc.hbuf.Bytes(), nil
-}
-
-func (cc *ClientConn) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx := req.Context()
-	cs := &clientStream{
-		cc:                   cc,
-		ctx:                  ctx,
-		reqCancel:            req.Cancel,
-		isHead:               req.Method == "HEAD",
-		reqBody:              req.Body,
-		reqBodyContentLength: actualContentLength(req),
-		trace:                httptrace.ContextClientTrace(ctx),
-		peerClosed:           make(chan struct{}),
-		abort:                make(chan struct{}),
-		respHeaderRecv:       make(chan struct{}),
-		donec:                make(chan struct{}),
-	}
-	go cs.doRequest(req, nil)
-
-	waitDone := func() error {
-		select {
-		case <-cs.donec:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-cs.reqCancel:
-			return errRequestCanceled
-		}
-	}
-
-	handleResponseHeaders := func() (*http.Response, error) {
-		res := cs.res
-		if res.StatusCode > 299 {
-			// On error or status code 3xx, 4xx, 5xx, etc abort any
-			// ongoing write, assuming that the server doesn't care
-			// about our request body. If the server replied with 1xx or
-			// 2xx, however, then assume the server DOES potentially
-			// want our body (e.g. full-duplex streaming:
-			// golang.org/issue/13444). If it turns out the server
-			// doesn't, they'll RST_STREAM us soon enough. This is a
-			// heuristic to avoid adding knobs to Transport. Hopefully
-			// we can keep it.
-			cs.abortRequestBodyWrite()
-		}
-		res.Request = req
-		// PATCH START
-		if cc.tlsState != nil {
-			res.TLS = &cryptotls.ConnectionState{
-				Version:                     cc.tlsState.Version,
-				HandshakeComplete:           cc.tlsState.HandshakeComplete,
-				DidResume:                   cc.tlsState.DidResume,
-				CipherSuite:                 cc.tlsState.CipherSuite,
-				NegotiatedProtocol:          cc.tlsState.NegotiatedProtocol,
-				NegotiatedProtocolIsMutual:  cc.tlsState.NegotiatedProtocolIsMutual,
-				ServerName:                  cc.tlsState.ServerName,
-				PeerCertificates:            cc.tlsState.PeerCertificates,
-				VerifiedChains:              cc.tlsState.VerifiedChains,
-				SignedCertificateTimestamps: cc.tlsState.SignedCertificateTimestamps,
-				OCSPResponse:                cc.tlsState.OCSPResponse,
-				TLSUnique:                   cc.tlsState.TLSUnique,
-			}
-		}
-		// PATCH END
-		if res.Body == noBody && actualContentLength(req) == 0 {
-			// If there isn't a request or response body still being
-			// written, then wait for the stream to be closed before
-			// RoundTrip returns.
-			if err := waitDone(); err != nil {
-				return nil, err
-			}
-		}
-		return res, nil
-	}
-
-	cancelRequest := func(cs *clientStream, err error) error {
-		cs.cc.mu.Lock()
-		bodyClosed := cs.reqBodyClosed
-		cs.cc.mu.Unlock()
-		// Wait for the request body to be closed.
-		//
-		// If nothing closed the body before now, abortStreamLocked
-		// will have started a goroutine to close it.
-		//
-		// Closing the body before returning avoids a race condition
-		// with net/http checking its readTrackingBody to see if the
-		// body was read from or closed. See golang/go#60041.
-		//
-		// The body is closed in a separate goroutine without the
-		// connection mutex held, but dropping the mutex before waiting
-		// will keep us from holding it indefinitely if the body
-		// close is slow for some reason.
-		if bodyClosed != nil {
-			<-bodyClosed
-		}
-		return err
-	}
-
-	for {
-		select {
-		case <-cs.respHeaderRecv:
-			return handleResponseHeaders()
-		case <-cs.abort:
-			select {
-			case <-cs.respHeaderRecv:
-				// If both cs.respHeaderRecv and cs.abort are signaling,
-				// pick respHeaderRecv. The server probably wrote the
-				// response and immediately reset the stream.
-				// golang.org/issue/49645
-				return handleResponseHeaders()
-			default:
-				waitDone()
-				return nil, cs.abortErr
-			}
-		case <-ctx.Done():
-			err := ctx.Err()
-			cs.abortStream(err)
-			return nil, cancelRequest(cs, err)
-		case <-cs.reqCancel:
-			cs.abortStream(errRequestCanceled)
-			return nil, cancelRequest(cs, errRequestCanceled)
-		}
-	}
 }
 
 // foreachHeaderElement splits v according to the "#rule" construction
