@@ -2,17 +2,17 @@
 package browser
 
 import (
-	"encoding/json"
 	"reflect"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/grafana/sobek"
 	"github.com/shiroyk/ski/js"
+	"github.com/shiroyk/ski/modules"
 )
 
 func init() {
-	js.Register("browser", new(Browser))
+	modules.Register("browser", new(Browser))
 }
 
 type Browser struct{}
@@ -49,12 +49,7 @@ func toGoStruct[T any](value sobek.Value, vm *sobek.Runtime) (t T) {
 	if sobek.IsUndefined(value) {
 		return
 	}
-	bytes, err := value.ToObject(vm).MarshalJSON()
-	if err != nil {
-		js.Throw(vm, err)
-	}
-	err = json.Unmarshal(bytes, &t)
-	if err != nil {
+	if err := vm.ExportTo(value, &t); err != nil {
 		js.Throw(vm, err)
 	}
 	return
@@ -65,14 +60,5 @@ func toJSObject(value any, vm *sobek.Runtime) sobek.Value {
 	if value == nil {
 		return sobek.Undefined()
 	}
-	bytes, err := json.Marshal(value)
-	if err != nil {
-		js.Throw(vm, err)
-	}
-	var obj map[string]any
-	err = json.Unmarshal(bytes, &obj)
-	if err != nil {
-		js.Throw(vm, err)
-	}
-	return vm.ToValue(obj)
+	return vm.ToValue(value)
 }
