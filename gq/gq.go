@@ -9,6 +9,7 @@ import (
 	"github.com/andybalholm/cascadia"
 	"github.com/grafana/sobek"
 	"github.com/shiroyk/ski/js"
+	"github.com/shiroyk/ski/js/types"
 	"github.com/shiroyk/ski/modules"
 	htmlutil "github.com/shiroyk/ski/modules/html"
 	"golang.org/x/net/html"
@@ -180,7 +181,7 @@ func (Gq) length(call sobek.FunctionCall, rt *sobek.Runtime) sobek.Value {
 
 func (Gq) values(call sobek.FunctionCall, rt *sobek.Runtime) sobek.Value {
 	sel := thisToSel(rt, call.This)
-	return js.Iterator(rt, func(yield func(any) bool) {
+	return types.Iterator(rt, func(yield func(any) bool) {
 		for _, node := range sel.Nodes {
 			if !yield(node) {
 				return
